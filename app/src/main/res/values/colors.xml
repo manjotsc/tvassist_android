@@ -1,0 +1,4 @@
+<resources>
+    <!-- Matches OverlayTheme's default background so the icon reads as part of the app. -->
+    <color name="ic_launcher_background">#12161B</color>
+</resources>

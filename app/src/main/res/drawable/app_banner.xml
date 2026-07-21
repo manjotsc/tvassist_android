@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Android TV leanback banner - full-bleed: the HA-blue gradient fills the whole 320x180 tile
+     (the launcher rounds the corners), with the toggle centred on top. Matches the launcher icon's
+     mark but sized to fill rather than float. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="320dp"
+    android:height="180dp"
+    android:viewportWidth="320"
+    android:viewportHeight="180">
+    <path android:pathData="M0,0 H320 V180 H0 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient android:type="linear"
+                android:startX="0" android:startY="0"
+                android:endX="224" android:endY="180">
+                <item android:offset="0" android:color="#FF5FD8FF" />
+                <item android:offset="1" android:color="#FF0E9AD6" />
+            </gradient>
+        </aapt:attr>
+    </path>
+    <path android:fillColor="#FFFFFFFF" android:pathData="M118,57 H202 A33,33 0 0 1 235,90 V90 A33,33 0 0 1 202,123 H118 A33,33 0 0 1 85,90 V90 A33,33 0 0 1 118,57 Z" />
+    <path android:fillColor="#FF0E9AD6" android:pathData="M178,90 a24,24 0 1 0 48,0 a24,24 0 1 0 -48,0 Z" />
+</vector>

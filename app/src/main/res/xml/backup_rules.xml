@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Android 11 and below (android:fullBackupContent). Back up everything EXCEPT the HA
+     credentials store, so the URL + long-lived token never land in a cloud/USB backup. -->
+<full-backup-content>
+    <exclude domain="file" path="datastore/tv_assist_credentials.preferences_pb" />
+    <exclude domain="file" path="tv_setup_cert.p12" />
+</full-backup-content>

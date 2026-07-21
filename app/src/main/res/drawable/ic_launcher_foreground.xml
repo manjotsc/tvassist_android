@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Adaptive-icon foreground: just the toggle (white track + deep-blue knob), centred inside the
+     72x72dp safe zone. The HA-blue gradient is the background layer, so the icon is full-bleed. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M40,40 H68 A14,14 0 0 1 82,54 V54 A14,14 0 0 1 68,68 H40 A14,14 0 0 1 26,54 V54 A14,14 0 0 1 40,40 Z" />
+    <path
+        android:fillColor="#FF0E9AD6"
+        android:pathData="M57,54 a11,11 0 1 0 22,0 a11,11 0 1 0 -22,0 Z" />
+</vector>

@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <!--
+      Home Assistant and many IP cameras are reached over plain HTTP on the local network, so
+      cleartext must stay permitted for the app to work. This replaces the blanket
+      android:usesCleartextTraffic="true" with a config you can tighten per-host later.
+
+      To enforce HTTPS everywhere except your own devices: set cleartextTrafficPermitted="false"
+      on base-config and add a domain-config listing only your local hosts, e.g.
+
+        <domain-config cleartextTrafficPermitted="true">
+            <domain includeSubdomains="true">homeassistant.local</domain>
+            <domain>192.168.1.20</domain>
+        </domain-config>
+    -->
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>
