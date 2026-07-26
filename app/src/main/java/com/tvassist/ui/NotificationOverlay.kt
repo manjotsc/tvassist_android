@@ -274,11 +274,15 @@ private fun NotificationCard(n: TvNotification, repository: HaRepository, fromTo
         else -> null
     }
     var image by remember(n.id) { mutableStateOf<ImageBitmap?>(null) }
-    LaunchedEffect(n.id, stillUrl, n.camera) {
+    // Keyed on createdAt as well as id: cards compose under key(n.id), so replacing a notification
+    // that reuses an id (a doorbell firing twice inside its duration) keeps the same composition
+    // alive. Without createdAt the URL is unchanged, the effect never re-runs, and the second ring
+    // would show the first ring's photo.
+    LaunchedEffect(n.id, n.createdAt, stillUrl, n.camera) {
         image = when {
             n.camera.isNotBlank() ->
                 repository.cameraSnapshot(n.camera)?.let { decodeOffThread(it)?.asImageBitmap() }
-            stillUrl != null -> repository.fetchEntityPicture(stillUrl)?.asImageBitmap()
+            stillUrl != null -> repository.fetchStillImage(stillUrl)?.asImageBitmap()
             else -> null
         }
     }
@@ -294,7 +298,7 @@ private fun NotificationCard(n: TvNotification, repository: HaRepository, fromTo
     }
     // Instant snapshot poster shown under the video while the stream starts (masks startup latency).
     var videoPoster by remember(n.id) { mutableStateOf<ImageBitmap?>(null) }
-    LaunchedEffect(n.id, n.cameraStream) {
+    LaunchedEffect(n.id, n.createdAt, n.cameraStream) {
         val camId = n.cameraStream.ifBlank { n.camera }
         if (camId.isNotBlank()) {
             repository.cameraSnapshot(camId)?.let { bytes ->

@@ -391,32 +391,58 @@ class HaRepository(
     // Cache for entity pictures (avatars), keyed by their relative/absolute path.
     private val pictureCache = android.util.LruCache<String, Bitmap>(24)
 
+    /** Resolves a relative HA path against [baseUrl]; absolute http(s) URLs pass through. */
+    private fun absoluteUrl(path: String): String? {
+        if (path.startsWith("http")) return path
+        val base = baseUrl
+        if (base.isBlank()) return null
+        return base + (if (path.startsWith("/")) path else "/$path")
+    }
+
     /** Fetches an entity_picture (avatar) by its HA path, authenticated, or null. */
     suspend fun fetchEntityPicture(path: String): Bitmap? = withContext(Dispatchers.IO) {
         pictureCache.get(path)?.let { return@withContext it }
-        val base = baseUrl
-        val url = if (path.startsWith("http")) path else {
-            if (base.isBlank()) return@withContext null
-            base + (if (path.startsWith("/")) path else "/$path")
-        }
+        val url = absoluteUrl(path) ?: return@withContext null
         runCatching {
             val req = Request.Builder().url(url).header("Authorization", "Bearer $token").build()
             httpClient.newCall(req).execute().use { resp ->
-                if (resp.isSuccessful) resp.body?.bytes()?.let(::decodeSampledAvatar) else null
+                if (resp.isSuccessful) resp.body?.bytes()?.let { decodeSampled(it, MAX_AVATAR_PX) } else null
             }
         }.getOrNull()?.also { pictureCache.put(path, it) }
     }
 
     /**
-     * Decode an avatar downsampled to at most [MAX_AVATAR_PX] on its longest edge. HA entity_pictures
-     * are often 500px+ but we draw them at 14–64dp, so decoding full-res just wastes memory (~1 MB
-     * each, ×24 cached) and CPU. 256px still covers the largest use (person-map markers).
+     * Fetches a notification's still image (its ``image``/``media_url``) by URL or HA path, or null.
+     *
+     * Deliberately **uncached**, unlike [fetchEntityPicture]: a still lives behind a fixed filename
+     * whose content changes — a doorbell automation snapshots to the same `/local/…jpg` on every
+     * ring — so a path-keyed cache would pin the first frame for the life of the process. Decoded to
+     * [MAX_STILL_PX] rather than the avatar cap, since the card draws it full-width, not in a chip.
      */
-    private fun decodeSampledAvatar(bytes: ByteArray): Bitmap? {
+    suspend fun fetchStillImage(path: String): Bitmap? = withContext(Dispatchers.IO) {
+        val url = absoluteUrl(path) ?: return@withContext null
+        runCatching {
+            val req = Request.Builder().url(url)
+                .header("Authorization", "Bearer $token")
+                .header("Cache-Control", "no-cache")
+                .build()
+            httpClient.newCall(req).execute().use { resp ->
+                Log.i(CAM, "still($url) code=${resp.code}")
+                if (resp.isSuccessful) resp.body?.bytes()?.let { decodeSampled(it, MAX_STILL_PX) } else null
+            }
+        }.getOrNull()
+    }
+
+    /**
+     * Decode [bytes] downsampled so its longest edge is at most [maxPx]. HA entity_pictures are often
+     * 500px+ but avatars draw at 14–64dp, so decoding full-res just wastes memory (~1 MB each, ×24
+     * cached) and CPU; notification stills draw far larger and get a correspondingly higher cap.
+     */
+    private fun decodeSampled(bytes: ByteArray, maxPx: Int): Bitmap? {
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
         var sample = 1
-        while (maxOf(bounds.outWidth, bounds.outHeight) / sample > MAX_AVATAR_PX) sample *= 2
+        while (maxOf(bounds.outWidth, bounds.outHeight) / sample > maxPx) sample *= 2
         val opts = BitmapFactory.Options().apply { inSampleSize = sample }
         return BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)
     }
@@ -425,6 +451,10 @@ class HaRepository(
         const val CAM = "HaCamera"
         // Longest-edge cap for cached avatars; plenty for list icons and person-map markers.
         const val MAX_AVATAR_PX = 256
+        // Longest-edge cap for notification stills. The card draws them up to 460dp wide — ~1840px
+        // on a 4K panel (density 4) — so 1920 keeps them sharp at ~8 MB peak, while still bounding a
+        // 4K camera snapshot that would otherwise decode to ~33 MB and risk an OOM on a TV stick.
+        const val MAX_STILL_PX = 1920
     }
 }
 
