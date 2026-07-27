@@ -38,6 +38,8 @@ data class SettingsBackup(
     val version: Int = 1,
     val baseUrl: String = "",
     val token: String = "",
+    /** Verify the HA TLS certificate. Off allows a self-signed cert on a private (LAN) host. */
+    val verifySsl: Boolean = true,
     val importedEntityIds: List<String> = emptyList(),
     val sidebarEntityIds: List<String> = emptyList(),
     val overlayLayout: OverlayLayout = OverlayLayout(),
@@ -139,6 +141,12 @@ private val Context.credentialsStore: DataStore<Preferences> by preferencesDataS
 data class Settings(
     val baseUrl: String = "",
     val token: String = "",
+    /**
+     * Verify the Home Assistant TLS certificate. Turning this off lets a self-signed / private-CA
+     * cert connect, but only when the host resolves entirely into private address space — see
+     * [com.tvassist.data.ha.InsecureTls]. Ignored for `http://` and for public hosts.
+     */
+    val verifySsl: Boolean = true,
     /** Curated entities the app tracks/loads (the imported pool). */
     val importedEntityIds: List<String> = emptyList(),
     /** Legacy flat list of overlay entities; migrated into [overlayLayout]. */
@@ -397,6 +405,7 @@ class SettingsStore(private val context: Context) {
                 // location so installs from before the split keep working until they're migrated.
                 baseUrl = creds[KEY_BASE_URL] ?: prefs[KEY_BASE_URL] ?: "",
                 token = SecretCrypto.decrypt(creds[KEY_TOKEN] ?: prefs[KEY_TOKEN] ?: ""),
+                verifySsl = prefs[KEY_VERIFY_SSL] ?: true,
                 importedEntityIds = readImportedIds(prefs),
                 sidebarEntityIds = readSidebarIds(prefs),
                 overlayLayout = readLayout(prefs),
@@ -639,6 +648,14 @@ class SettingsStore(private val context: Context) {
             prefs.remove(KEY_BASE_URL)
             prefs.remove(KEY_TOKEN)
         }
+    }
+
+    /**
+     * Verify the HA TLS certificate. Stored in the plain settings store (not credentials) — it's a
+     * preference, not a secret — so it rides along in backup/restore.
+     */
+    suspend fun setVerifySsl(on: Boolean) {
+        context.dataStore.edit { prefs -> prefs[KEY_VERIFY_SSL] = on }
     }
 
     suspend fun setTriggerKeyCode(keyCode: Int) {
@@ -1041,7 +1058,7 @@ class SettingsStore(private val context: Context) {
             else -> value
         }
         return SettingsBackup(
-            baseUrl = s.baseUrl, token = secret(s.token),
+            baseUrl = s.baseUrl, token = secret(s.token), verifySsl = s.verifySsl,
             importedEntityIds = s.importedEntityIds, sidebarEntityIds = s.sidebarEntityIds,
             overlayLayout = s.overlayLayout, entityOverrides = s.entityOverrides,
             triggerKeyCode = s.triggerKeyCode, autoCloseSeconds = s.autoCloseSeconds,
@@ -1118,6 +1135,7 @@ class SettingsStore(private val context: Context) {
             context.dataStore.edit { prefs ->
                 prefs.remove(KEY_BASE_URL)
                 prefs.remove(KEY_TOKEN)
+                prefs[KEY_VERIFY_SSL] = backup.verifySsl
                 prefs[KEY_IMPORTED] =
                     json.encodeToString(ListSerializer(String.serializer()), backup.importedEntityIds)
                 prefs[KEY_SIDEBAR_ORDERED] =
@@ -1186,6 +1204,7 @@ class SettingsStore(private val context: Context) {
 
         val KEY_BASE_URL = stringPreferencesKey("base_url")
         val KEY_TOKEN = stringPreferencesKey("token")
+        val KEY_VERIFY_SSL = booleanPreferencesKey("verify_ssl")
         // Imported pool (JSON list of entity ids) the app tracks/loads.
         val KEY_IMPORTED = stringPreferencesKey("imported_entity_ids")
         // Ordered list (JSON) of sidebar entity ids; KEY_SIDEBAR_SET is the legacy set.

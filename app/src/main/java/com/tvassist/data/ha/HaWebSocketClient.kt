@@ -41,9 +41,15 @@ import kotlin.coroutines.resume
 class HaWebSocketClient {
 
     private val json = Json { ignoreUnknownKeys = true }
-    private val http = OkHttpClient.Builder()
-        .pingInterval(20, TimeUnit.SECONDS)
-        .build()
+    private fun httpBuilder() = OkHttpClient.Builder().pingInterval(20, TimeUnit.SECONDS)
+
+    private val httpStrict = httpBuilder().build()
+    // Built only if the user actually turns verification off for a private host (see [InsecureTls]).
+    private val httpRelaxed by lazy { InsecureTls.relax(httpBuilder()).build() }
+
+    @Volatile
+    private var relaxTls = false
+    private val http: OkHttpClient get() = if (relaxTls) httpRelaxed else httpStrict
 
     private val _connectionState = MutableStateFlow<ConnectionState>(ConnectionState.Disconnected)
     val connectionState: StateFlow<ConnectionState> = _connectionState.asStateFlow()
@@ -181,14 +187,17 @@ class HaWebSocketClient {
     }
 
     @Synchronized
-    fun connect(baseUrl: String, accessToken: String) {
+    fun connect(baseUrl: String, accessToken: String, relaxTls: Boolean = false) {
         // Idempotent: skip if we're already (re)connecting to the same target — avoids the
-        // connect→disconnect→reconnect churn when several callers connect on launch.
-        if (baseUrl == lastUrl && accessToken == lastToken && currentSocket != null &&
+        // connect→disconnect→reconnect churn when several callers connect on launch. The TLS mode is
+        // part of the target: flipping the verify toggle must force a genuine reconnect.
+        if (baseUrl == lastUrl && accessToken == lastToken && relaxTls == this.relaxTls &&
+            currentSocket != null &&
             (_connectionState.value is ConnectionState.Connected || _connectionState.value is ConnectionState.Connecting)
         ) {
             return
         }
+        this.relaxTls = relaxTls
         lastUrl = baseUrl
         lastToken = accessToken
         deliberate = false

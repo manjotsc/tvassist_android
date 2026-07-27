@@ -13,7 +13,8 @@ class SetupWebServer(
     sslContext: javax.net.ssl.SSLContext? = null,
     private val pin: () -> String,
     private val prefillUrl: () -> String,
-    private val onCredentials: (url: String, token: String) -> Unit,
+    private val prefillVerifySsl: () -> Boolean,
+    private val onCredentials: (url: String, token: String, verifySsl: Boolean) -> Unit,
     private val listCameras: () -> List<LocalCamera>,
     private val onSaveCamera: (LocalCamera) -> Unit,
     private val onDeleteCamera: (String) -> Unit,
@@ -93,8 +94,10 @@ class SetupWebServer(
             val f = req.form()
             val url = f["url"]?.trim().orEmpty()
             val token = f["token"]?.trim().orEmpty()
+            // An unchecked checkbox is simply absent from the POST body.
+            val verifySsl = f["verify_ssl"] != null
             if (url.isNotEmpty() && token.isNotEmpty()) {
-                onCredentials(url, token)
+                onCredentials(url, token, verifySsl)
                 return html(page("Connection", """<div class="ok">Sent to your TV — check the screen for status.</div>${connectionForm()}"""))
             }
             return html(page("Connection", """<div class="err">Fill in both fields.</div>${connectionForm()}"""))
@@ -310,6 +313,9 @@ class SetupWebServer(
             placeholder="http://homeassistant.local:8123" value="${escape(prefillUrl())}">
           <label>Long-lived access token</label>
           <textarea name="token" autocapitalize="off" autocorrect="off" placeholder="Paste token from your HA profile"></textarea>
+          <label><input type="checkbox" name="verify_ssl" value="1"${if (prefillVerifySsl()) " checked" else ""}> Verify TLS certificate</label>
+          <p class="muted">Uncheck only for a self-signed certificate. Ignored unless Home Assistant
+            is on your local network — a public address always requires a valid certificate.</p>
           <button type="submit">Connect</button>
         </form>
     """

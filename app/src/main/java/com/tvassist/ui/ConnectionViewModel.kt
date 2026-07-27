@@ -302,7 +302,8 @@ class ConnectionViewModel(
                 sslContext = ssl,
                 pin = { _setupPin.value ?: "" },
                 prefillUrl = { settings.value.baseUrl },
-                onCredentials = { url, token -> saveAndConnect(url, token) },
+                prefillVerifySsl = { settings.value.verifySsl },
+                onCredentials = { url, token, verify -> saveAndConnect(url, token, verify) },
                 listCameras = { settings.value.localCameras },
                 onSaveCamera = { saveLocalCamera(it) },
                 onDeleteCamera = { deleteLocalCamera(it) },
@@ -353,11 +354,21 @@ class ConnectionViewModel(
         super.onCleared()
     }
 
-    fun saveAndConnect(baseUrl: String, token: String) {
+    /**
+     * Saves credentials and dials HA. [verifySsl] is written first when supplied, so the connect
+     * below already sees the intended TLS mode instead of reconnecting a moment later.
+     */
+    fun saveAndConnect(baseUrl: String, token: String, verifySsl: Boolean? = null) {
         viewModelScope.launch {
+            if (verifySsl != null) settingsStore.setVerifySsl(verifySsl)
             settingsStore.setConnection(baseUrl.trim(), token.trim())
             repository.connect(baseUrl.trim(), token.trim())
         }
+    }
+
+    /** Toggle HA certificate verification; the repository re-dials on the change on its own. */
+    fun setVerifySsl(on: Boolean) {
+        viewModelScope.launch { settingsStore.setVerifySsl(on) }
     }
 
     fun connectWithStored() {

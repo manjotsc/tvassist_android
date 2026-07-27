@@ -59,17 +59,46 @@ class HaRepository(
     private var baseUrl: String = ""
     @Volatile
     private var token: String = ""
-    private val httpClient = OkHttpClient.Builder()
+    private fun httpBuilder() = OkHttpClient.Builder()
         .callTimeout(8, TimeUnit.SECONDS)
         // Map tiles all come from one host; raise the per-host cap so the grid fetches in parallel
         // (otherwise OkHttp serialises to 5/host and a zoom takes a second+).
         .dispatcher(okhttp3.Dispatcher().apply { maxRequestsPerHost = 16 })
-        .build()
 
     // Long-lived client for MJPEG streaming (no read timeout — the stream stays open).
-    private val streamClient = OkHttpClient.Builder()
+    private fun streamBuilder() = OkHttpClient.Builder()
         .readTimeout(0, TimeUnit.MILLISECONDS)
-        .build()
+
+    // Full certificate verification — the default, and the only thing public hosts ever get.
+    private val httpStrict = httpBuilder().build()
+    private val streamStrict = streamBuilder().build()
+
+    // Relaxed variants, built only if the user turns verification off for a private HA host.
+    private val httpRelaxed by lazy { InsecureTls.relax(httpBuilder()).build() }
+    private val streamRelaxed by lazy { InsecureTls.relax(streamBuilder()).build() }
+
+    /** Set on connect: verification is off AND the HA host resolves entirely into private space. */
+    @Volatile
+    private var relaxTls = false
+
+    // Clients for requests built from [baseUrl] — the host [relaxTls] was decided against.
+    private val haClient: OkHttpClient get() = if (relaxTls) httpRelaxed else httpStrict
+    private val haStream: OkHttpClient get() = if (relaxTls) streamRelaxed else streamStrict
+
+    /**
+     * Client for an arbitrary [url]: relaxed only when it targets the exact HA host we cleared.
+     *
+     * Without the host check, turning verification off for Home Assistant would also disable it for
+     * OpenStreetMap/Google map tiles and for local-camera snapshot URLs on other hosts — none of
+     * which the user consented to, and some of which are on the public internet.
+     */
+    private fun clientFor(url: String): OkHttpClient {
+        val h = hostOf(url)
+        return if (relaxTls && h != null && h == hostOf(baseUrl)) httpRelaxed else httpStrict
+    }
+
+    private fun hostOf(url: String): String? =
+        runCatching { java.net.URI(url).host?.lowercase() }.getOrNull()
 
     val connectionState: StateFlow<ConnectionState> = client.connectionState
 
@@ -109,12 +138,36 @@ class HaRepository(
             val s = settingsStore.settings.first()
             if (s.baseUrl.isNotBlank() && s.token.isNotBlank()) connect(s.baseUrl, s.token)
         }
+        // Re-dial when the verify-certificate preference changes, so the toggle takes effect without
+        // the user having to re-enter credentials. connect() is idempotent per (url, token, tls).
+        scope.launch {
+            settingsStore.settings.map { it.verifySsl }.distinctUntilChanged().collect {
+                val s = settingsStore.settings.first()
+                if (s.baseUrl.isNotBlank() && s.token.isNotBlank()) connect(s.baseUrl, s.token)
+            }
+        }
     }
 
     fun connect(baseUrl: String, token: String) {
-        this.baseUrl = baseUrl.trim().trimEnd('/')
+        val url = baseUrl.trim().trimEnd('/')
+        this.baseUrl = url
         this.token = token
-        client.connect(baseUrl, token)
+        // The TLS decision needs a DNS lookup, so it can't happen on the caller's thread.
+        scope.launch(Dispatchers.IO) {
+            relaxTls = shouldRelaxTls(url)
+            client.connect(url, token, relaxTls)
+        }
+    }
+
+    /**
+     * Whether to skip certificate verification for [url]. Requires all three: an `https://` URL, the
+     * user having turned verification off, and the host resolving entirely into private address
+     * space. Anything else keeps full verification — see [InsecureTls].
+     */
+    private suspend fun shouldRelaxTls(url: String): Boolean {
+        if (!url.startsWith("https", ignoreCase = true)) return false
+        if (settingsStore.settings.first().verifySsl) return false
+        return InsecureTls.isPrivateHost(url)
     }
 
     /**
@@ -143,7 +196,7 @@ class HaRepository(
                 .url("$base/api/camera_proxy/$entityId")
                 .header("Authorization", "Bearer $token")
                 .build()
-            httpClient.newCall(req).execute().use { resp ->
+            haClient.newCall(req).execute().use { resp ->
                 Log.i(CAM, "snapshot($entityId) code=${resp.code}")
                 if (resp.isSuccessful) resp.body?.bytes() else null
             }
@@ -185,7 +238,7 @@ class HaRepository(
         Log.i(CAM, "mjpeg connecting: $url")
         try {
             val req = Request.Builder().url(url).header("Authorization", "Bearer $token").build()
-            streamClient.newCall(req).execute().use { resp ->
+            haStream.newCall(req).execute().use { resp ->
                 Log.i(CAM, "mjpeg response code=${resp.code} type=${resp.header("Content-Type")}")
                 if (!resp.isSuccessful) return@use
                 val input = BufferedInputStream(resp.body?.byteStream() ?: return@use, 64 * 1024)
@@ -232,7 +285,7 @@ class HaRepository(
         return runCatching {
             val url = "https://tile.openstreetmap.org/$zoom/$x/$y.png"
             val req = Request.Builder().url(url).header("User-Agent", "TVAssist/1.0 (Android TV)").build()
-            httpClient.newCall(req).execute().use { resp ->
+            httpStrict.newCall(req).execute().use { resp ->
                 if (resp.isSuccessful) resp.body?.bytes()?.let { BitmapFactory.decodeByteArray(it, 0, it.size) } else null
             }
         }.getOrNull()?.also { tileCache.put(key, it) }
@@ -262,7 +315,7 @@ class HaRepository(
                 .url("https://tile.googleapis.com/v1/createSession?key=$key")
                 .post(body.toRequestBody("application/json".toMediaType()))
                 .build()
-            httpClient.newCall(req).execute().use { resp ->
+            httpStrict.newCall(req).execute().use { resp ->
                 if (!resp.isSuccessful) { Log.w(CAM, "google map session failed: ${resp.code}"); return@use null }
                 val obj = Json.parseToJsonElement(resp.body?.string() ?: return@use null).jsonObject
                 val token = obj["session"]?.jsonPrimitive?.contentOrNull ?: return@use null
@@ -279,7 +332,7 @@ class HaRepository(
         tileCache.get(cacheKey)?.let { return it }
         return runCatching {
             val url = "https://tile.googleapis.com/v1/2dtiles/$zoom/$x/$y?session=$session&key=$key"
-            httpClient.newCall(Request.Builder().url(url).build()).execute().use { resp ->
+            httpStrict.newCall(Request.Builder().url(url).build()).execute().use { resp ->
                 if (resp.isSuccessful) resp.body?.bytes()?.let { BitmapFactory.decodeByteArray(it, 0, it.size) } else null
             }
         }.getOrNull()?.also { tileCache.put(cacheKey, it) }
@@ -376,7 +429,7 @@ class HaRepository(
                 .url("$base/api/states/zone.home")
                 .header("Authorization", "Bearer $token")
                 .build()
-            httpClient.newCall(req).execute().use { resp ->
+            haClient.newCall(req).execute().use { resp ->
                 if (!resp.isSuccessful) return@use null
                 val body = resp.body?.string() ?: return@use null
                 val attrs = kotlinx.serialization.json.Json.parseToJsonElement(body)
@@ -405,7 +458,7 @@ class HaRepository(
         val url = absoluteUrl(path) ?: return@withContext null
         runCatching {
             val req = Request.Builder().url(url).header("Authorization", "Bearer $token").build()
-            httpClient.newCall(req).execute().use { resp ->
+            clientFor(url).newCall(req).execute().use { resp ->
                 if (resp.isSuccessful) resp.body?.bytes()?.let { decodeSampled(it, MAX_AVATAR_PX) } else null
             }
         }.getOrNull()?.also { pictureCache.put(path, it) }
@@ -426,7 +479,7 @@ class HaRepository(
                 .header("Authorization", "Bearer $token")
                 .header("Cache-Control", "no-cache")
                 .build()
-            httpClient.newCall(req).execute().use { resp ->
+            clientFor(url).newCall(req).execute().use { resp ->
                 Log.i(CAM, "still($url) code=${resp.code}")
                 if (resp.isSuccessful) resp.body?.bytes()?.let { decodeSampled(it, MAX_STILL_PX) } else null
             }

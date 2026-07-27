@@ -556,7 +556,8 @@ private fun HomeContent(
                 initialToken = settings.token,
                 connection = connection,
                 webOnboarding = webOnboarding,
-                onConnect = { url, token -> viewModel.saveAndConnect(url, token) },
+                initialVerifySsl = settings.verifySsl,
+                onConnect = { url, token, verify -> viewModel.saveAndConnect(url, token, verify) },
                 onStartWeb = viewModel::startWebOnboarding,
                 onStopWeb = viewModel::stopWebOnboarding,
             )
@@ -872,7 +873,8 @@ private fun OnboardingSection(
     initialToken: String,
     connection: ConnectionState,
     webOnboarding: WebOnboarding,
-    onConnect: (String, String) -> Unit,
+    initialVerifySsl: Boolean,
+    onConnect: (String, String, Boolean) -> Unit,
     onStartWeb: () -> Unit,
     onStopWeb: () -> Unit,
 ) {
@@ -891,6 +893,7 @@ private fun OnboardingSection(
             SetupSection(
                 initialUrl = initialUrl,
                 initialToken = initialToken,
+                initialVerifySsl = initialVerifySsl,
                 onConnect = onConnect,
             )
             Spacer(Modifier.height(12.dp))
@@ -955,10 +958,12 @@ private fun WebPanel(
 private fun SetupSection(
     initialUrl: String,
     initialToken: String,
-    onConnect: (String, String) -> Unit,
+    initialVerifySsl: Boolean,
+    onConnect: (String, String, Boolean) -> Unit,
 ) {
     var url by remember(initialUrl) { mutableStateOf(initialUrl) }
     var token by remember(initialToken) { mutableStateOf(initialToken) }
+    var verify by remember(initialVerifySsl) { mutableStateOf(initialVerifySsl) }
 
     Column(modifier = Modifier.width(720.dp)) {
         Text("Home Assistant URL", color = Color(0xFFBBBBBB), fontSize = 14.sp)
@@ -977,8 +982,24 @@ private fun SetupSection(
             placeholder = "Paste token from HA profile",
             secret = true,
         )
+        // Only meaningful for https — an http:// URL has no certificate to verify.
+        if (url.trim().startsWith("https", ignoreCase = true)) {
+            Spacer(Modifier.height(16.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("Verify certificate", color = Color(0xFFBBBBBB), fontSize = 14.sp)
+                    Text(
+                        "Turn off to accept a self-signed certificate. Only takes effect when Home " +
+                            "Assistant is on your local network.",
+                        color = TxtMuted, fontSize = 12.sp,
+                    )
+                }
+                Spacer(Modifier.width(12.dp))
+                ChipButton(if (verify) "On" else "Off", selected = verify, onClick = { verify = !verify })
+            }
+        }
         Spacer(Modifier.height(20.dp))
-        AccentButton("Connect", { onConnect(url, token) }, leadingIcon = Icons.Rounded.Link)
+        AccentButton("Connect", { onConnect(url, token, verify) }, leadingIcon = Icons.Rounded.Link)
     }
 }
 
@@ -2266,7 +2287,8 @@ private fun ConnectionPage(viewModel: ConnectionViewModel, onBack: () -> Unit) {
             initialToken = settings.token,
             connection = connection,
             webOnboarding = webOnboarding,
-            onConnect = { url, token -> viewModel.saveAndConnect(url, token) },
+            initialVerifySsl = settings.verifySsl,
+            onConnect = { url, token, verify -> viewModel.saveAndConnect(url, token, verify) },
             onStartWeb = viewModel::startWebOnboarding,
             onStopWeb = viewModel::stopWebOnboarding,
         )
@@ -3125,6 +3147,29 @@ private fun SecurityPage(viewModel: ConnectionViewModel, onBack: () -> Unit) {
                 "Enter or regenerate them here.",
             color = TxtMuted, fontSize = 13.sp,
         )
+
+        // --- TLS verification for the HA connection (reconnects on change) ---
+        Spacer(Modifier.height(20.dp))
+        Text("Verify HA certificate", fontSize = 14.sp, color = TxtPrimary, fontWeight = FontWeight.SemiBold)
+        Spacer(Modifier.height(2.dp))
+        Text(
+            "Turn off to connect to a Home Assistant using a self-signed certificate. For safety this " +
+                "only applies when the server is on your local network — a public address always " +
+                "requires a valid certificate, and map tiles and icons are never affected.",
+            fontSize = 12.sp, color = TxtMuted,
+        )
+        Spacer(Modifier.height(6.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                if (settings.verifySsl) "Certificates are verified" else "Verification off for local HA",
+                color = TxtPrimary, fontSize = 15.sp, modifier = Modifier.weight(1f),
+            )
+            ChipButton(
+                if (settings.verifySsl) "On" else "Off",
+                selected = settings.verifySsl,
+                onClick = { viewModel.setVerifySsl(!settings.verifySsl) },
+            )
+        }
 
         // --- Home Assistant long-lived token (mirrors Settings → Connection; changing it reconnects) ---
         Spacer(Modifier.height(20.dp))
