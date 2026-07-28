@@ -25,8 +25,8 @@ import javax.net.ssl.X509TrustManager
  *    full verification no matter how the toggle is set.
  *  - **Resolved addresses, not name patterns.** A LAN can legitimately use real domain names via
  *    split-horizon DNS, so matching on the hostname string would lock those users out.
- *  - **Home Assistant clients only.** Icon downloads from the public internet keep strict
- *    verification — see [com.tvassist.ui.IconStore].
+ *  - **Home Assistant clients only.** Icon downloads and map tiles from the public internet keep
+ *    strict verification — see [HaRepository.clientFor] and [com.tvassist.ui.IconStore].
  */
 object InsecureTls {
     private const val TAG = "HaTls"

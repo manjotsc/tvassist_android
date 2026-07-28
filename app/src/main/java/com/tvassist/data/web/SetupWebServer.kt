@@ -313,7 +313,7 @@ class SetupWebServer(
             placeholder="http://homeassistant.local:8123" value="${escape(prefillUrl())}">
           <label>Long-lived access token</label>
           <textarea name="token" autocapitalize="off" autocorrect="off" placeholder="Paste token from your HA profile"></textarea>
-          <label><input type="checkbox" name="verify_ssl" value="1"${if (prefillVerifySsl()) " checked" else ""}> Verify TLS certificate</label>
+          <label class="check"><input type="checkbox" name="verify_ssl" value="1"${if (prefillVerifySsl()) " checked" else ""}> Verify TLS certificate</label>
           <p class="muted">Uncheck only for a self-signed certificate. Ignored unless Home Assistant
             is on your local network — a public address always requires a valid certificate.</p>
           <button type="submit">Connect</button>
@@ -420,6 +420,13 @@ class SetupWebServer(
           input, textarea, select { width:100%; box-sizing:border-box; padding:12px 14px; border-radius:10px;
             border:1px solid #333; background:#1b1f24; color:#fff; font-size:16px; }
           textarea { min-height:90px; resize:vertical; }
+          /* Checkbox rows opt out of the full-width block styling above, which would otherwise
+             stretch the box across the form and drop its caption onto the next line. */
+          label.check { display:flex; align-items:center; gap:10px; margin:18px 0 4px;
+            font-size:15px; color:#e6e6e6; cursor:pointer; }
+          label.check input[type=checkbox] { width:18px; height:18px; flex:0 0 auto;
+            margin:0; padding:0; accent-color:#1565c0; }
+          label.check + p.muted { margin:0 0 4px; font-size:13px; }
           button { margin-top:20px; width:100%; padding:14px; border:0; border-radius:10px;
             background:#1565c0; color:#fff; font-size:17px; font-weight:600; cursor:pointer; }
           button.danger { width:auto; margin:0; padding:8px 12px; background:#4a2020; color:#ff8a80; font-size:14px; }

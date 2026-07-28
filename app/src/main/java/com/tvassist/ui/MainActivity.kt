@@ -982,21 +982,21 @@ private fun SetupSection(
             placeholder = "Paste token from HA profile",
             secret = true,
         )
-        // Only meaningful for https — an http:// URL has no certificate to verify.
-        if (url.trim().startsWith("https", ignoreCase = true)) {
-            Spacer(Modifier.height(16.dp))
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) {
-                    Text("Verify certificate", color = Color(0xFFBBBBBB), fontSize = 14.sp)
-                    Text(
-                        "Turn off to accept a self-signed certificate. Only takes effect when Home " +
-                            "Assistant is on your local network.",
-                        color = TxtMuted, fontSize = 12.sp,
-                    )
-                }
-                Spacer(Modifier.width(12.dp))
-                ChipButton(if (verify) "On" else "Off", selected = verify, onClick = { verify = !verify })
+        // Always shown. Hiding it until the URL starts with https made it undiscoverable: someone
+        // whose https connection is failing on a self-signed cert can't tell the option exists, and
+        // a URL typed without a scheme (localhost:8123) never matched at all.
+        Spacer(Modifier.height(16.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text("Verify certificate", color = Color(0xFFBBBBBB), fontSize = 14.sp)
+                Text(
+                    "Turn off to accept a self-signed certificate. Applies only to https on your " +
+                        "local network — a public address always requires a valid certificate.",
+                    color = TxtMuted, fontSize = 12.sp,
+                )
             }
+            Spacer(Modifier.width(12.dp))
+            ChipButton(if (verify) "On" else "Off", selected = verify, onClick = { verify = !verify })
         }
         Spacer(Modifier.height(20.dp))
         AccentButton("Connect", { onConnect(url, token, verify) }, leadingIcon = Icons.Rounded.Link)
