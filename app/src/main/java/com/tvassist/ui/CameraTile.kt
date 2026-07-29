@@ -89,7 +89,10 @@ fun CameraTile(
         if (entity.isLocalCamera && localSnap == null) return@LaunchedEffect
         while (isActive) {
             if (localSnap != null) {
-                repository.fetchEntityPicture(localSnap)?.let { frame = it.asImageBitmap() }
+                // fetchStillImage, not fetchEntityPicture: the latter caches by URL with no expiry,
+                // so a fixed snapshot URL would pin the first frame and make this refresh loop a
+                // silent no-op for local cameras.
+                repository.fetchStillImage(localSnap)?.let { frame = it.asImageBitmap() }
             } else {
                 repository.cameraSnapshot(entity.entityId)?.let { bytes ->
                     decodeOffThread(bytes)?.let { frame = it.asImageBitmap() }

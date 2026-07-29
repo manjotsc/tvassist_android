@@ -63,7 +63,9 @@ fun CameraPlayerScreen(entity: Entity, repository: HaRepository, onBack: () -> U
         // Local cameras use their own snapshot URL (if any); HA cameras fetch via the API.
         if (entity.isLocalCamera) {
             entity.localSnapshotUrl?.takeIf { it.isNotBlank() }?.let { snapUrl ->
-                repository.fetchEntityPicture(snapUrl)?.let { snapshot = it.asImageBitmap() }
+                // Uncached: a local camera's snapshot URL is fixed but its content changes, so the
+                // avatar cache would show the first frame ever loaded instead of the current one.
+                repository.fetchStillImage(snapUrl)?.let { snapshot = it.asImageBitmap() }
             }
         } else {
             repository.cameraSnapshot(entity.entityId)?.let { bytes ->
