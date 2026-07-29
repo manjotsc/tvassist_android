@@ -311,7 +311,7 @@ class HaWebSocketClient {
         override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
             if (webSocket !== currentSocket) return // stale socket being torn down
             Log.w(TAG, "WebSocket failure", t)
-            _connectionState.value = ConnectionState.Failed(t.message ?: "Connection failed")
+            _connectionState.value = ConnectionState.Failed(failureReason(t))
             failPendingResults()
             scheduleReconnect()
         }
@@ -324,6 +324,39 @@ class HaWebSocketClient {
             failPendingResults()
             scheduleReconnect()
         }
+    }
+
+    /**
+     * Turns a connection exception into something a person can act on.
+     *
+     * Raw OkHttp/JSSE messages are useless on a TV — a self-signed certificate surfaces as
+     * "Trust anchor for certification path not found", which tells the user nothing about the
+     * setting that would fix it. Walks the cause chain, because the interesting exception is
+     * usually wrapped a level or two down.
+     */
+    private fun failureReason(t: Throwable): String {
+        var c: Throwable? = t
+        while (c != null) {
+            when (c) {
+                is javax.net.ssl.SSLPeerUnverifiedException ->
+                    return "Certificate doesn't match this address — check the URL, or turn off " +
+                        "Verify certificate in Settings → Security"
+                is java.security.cert.CertificateException,
+                is javax.net.ssl.SSLHandshakeException ->
+                    return "Certificate not trusted — if Home Assistant uses a self-signed " +
+                        "certificate, turn off Verify certificate in Settings → Security"
+                is java.net.UnknownHostException ->
+                    return "Can't find that address — check the Home Assistant URL"
+                is java.net.ConnectException ->
+                    return "Can't reach Home Assistant — check it's running and the port is right"
+                is java.net.SocketTimeoutException ->
+                    return "Timed out reaching Home Assistant"
+                is javax.net.ssl.SSLException ->
+                    return "Secure connection failed — is Home Assistant really using https?"
+            }
+            c = c.cause
+        }
+        return t.message ?: "Connection failed"
     }
 
     private fun handleMessage(ws: WebSocket, msg: JsonObject) {
