@@ -133,6 +133,7 @@ import com.tvassist.data.settings.EntityOverride
 import com.tvassist.data.settings.OverlayRow
 import com.tvassist.data.settings.OverlayTile
 import com.tvassist.data.settings.PressAction
+import com.tvassist.data.update.UpdateChecker
 import com.tvassist.keymap.KeyCaptureService
 import com.tvassist.overlay.OverlayService
 import androidx.lifecycle.lifecycleScope
@@ -3819,6 +3820,79 @@ private fun AboutPage(onBack: () -> Unit) {
         Spacer(Modifier.height(8.dp))
         Text("Home Assistant control overlays + remote key mapping for Android TV.",
             color = Color(0xFF999999), fontSize = 13.sp)
+        Spacer(Modifier.height(24.dp))
+        UpdateRow()
+    }
+}
+
+/**
+ * Advisory "is there a newer release?" row. Checks once when the About page opens (answers are
+ * cached for six hours) and on demand via the chip. Failures read as "Couldn't check" rather than
+ * an error — a checker that shouts when the wifi blips is worse than no checker.
+ */
+@OptIn(ExperimentalTvMaterial3Api::class)
+@Composable
+private fun UpdateRow() {
+    val current = com.tvassist.BuildConfig.VERSION_NAME
+    val scope = rememberCoroutineScope()
+    var state by remember { mutableStateOf<UpdateChecker.Result?>(null) }
+    var checking by remember { mutableStateOf(false) }
+
+    fun check(force: Boolean) {
+        if (checking) return
+        checking = true
+        scope.launch {
+            state = UpdateChecker.check(current, force)
+            checking = false
+        }
+    }
+    LaunchedEffect(Unit) { check(force = false) }
+
+    val s = state
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) {
+            Text("Updates", color = TxtPrimary, fontSize = 15.sp)
+            Spacer(Modifier.height(2.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    when {
+                        checking -> "Checking…"
+                        s is UpdateChecker.Result.Available -> "Version ${s.version} available on GitHub"
+                        s is UpdateChecker.Result.UpToDate -> "Up to date"
+                        else -> "Couldn't check right now"
+                    },
+                    color = if (s is UpdateChecker.Result.Available) AppAccent else TxtMuted,
+                    fontSize = 12.sp,
+                )
+                if (s is UpdateChecker.Result.Available) {
+                    Spacer(Modifier.width(8.dp))
+                    ReleaseTag(s.prerelease)
+                }
+            }
+        }
+        Spacer(Modifier.width(12.dp))
+        ChipButton("Check now", selected = false, onClick = { check(force = true) })
+    }
+    if (s is UpdateChecker.Result.Available) {
+        s.notes.takeIf { it.isNotBlank() }?.let { notes ->
+            Spacer(Modifier.height(10.dp))
+            Text(notes, color = TxtMuted, fontSize = 12.sp, lineHeight = 17.sp, maxLines = 8)
+        }
+    }
+}
+
+/** Non-interactive channel tag for a release: amber "Pre-release" vs green "Latest". */
+@Composable
+private fun ReleaseTag(prerelease: Boolean) {
+    val label = if (prerelease) "Pre-release" else "Latest"
+    val fg = if (prerelease) Color(0xFFF39C12) else Color(0xFF27AE60)
+    Box(
+        Modifier
+            .clip(RoundedCornerShape(6.dp))
+            .background(fg.copy(alpha = 0.18f))
+            .padding(horizontal = 8.dp, vertical = 2.dp),
+    ) {
+        Text(label, color = fg, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
     }
 }
 
