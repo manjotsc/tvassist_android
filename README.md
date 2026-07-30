@@ -1,5 +1,7 @@
 # TV Assist
 
+**Website: [tvassist.org](https://tvassist.org/)**
+
 An Android TV app that combines the two halves of a smart‑home TV experience:
 
 - **Home Assistant control** (like *QuickBars* - https://github.com/Trooped/QuickBars) — an overlay **sidebar** to control HA
