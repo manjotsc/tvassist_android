@@ -30,6 +30,7 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.tv.material3.Button
@@ -135,15 +136,22 @@ fun EntityControlCard(entity: Entity, actions: EntityControlActions, onDismiss: 
     val firstFocus = remember { FocusRequester() }
     LaunchedEffect(entity.entityId) { runCatching { firstFocus.requestFocus() } }
 
+    // The card must follow the user's palette: the rows it contains (AdjustableSliderRow etc.) are
+    // themed, so a hardcoded dark card left light sliders sitting on a dark panel under a light theme.
+    val th = LocalOverlayTheme.current
+
     Box(
-        modifier = Modifier.fillMaxSize().background(Color(0xCC000000)),
+        modifier = Modifier
+            .fillMaxSize()
+            // Scrim stays dark-on-light and light-on-dark so the card lifts off whatever is behind it.
+            .background(if (th.background.luminance() > 0.5f) Color(0x66000000) else Color(0xCC000000)),
         contentAlignment = Alignment.Center,
     ) {
         Column(
             modifier = Modifier
                 .widthIn(min = 360.dp, max = 440.dp)
                 .clip(RoundedCornerShape(18.dp))
-                .background(Color(0xFF181D23))
+                .background(th.background)
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(9.dp),
         ) {
@@ -160,12 +168,13 @@ fun EntityControlCard(entity: Entity, actions: EntityControlActions, onDismiss: 
                 )
                 Spacer(Modifier.width(11.dp))
                 Column(Modifier.weight(1f)) {
-                    Text(entity.friendlyName, color = Color.White, fontSize = 17.sp, maxLines = 1)
-                    Text(entity.entityId, color = SubText, fontSize = 11.sp, maxLines = 1)
+                    Text(entity.friendlyName, color = th.text, fontSize = 17.sp, maxLines = 1)
+                    Text(entity.entityId, color = th.subText, fontSize = 11.sp, maxLines = 1)
                 }
                 Text(
                     text = headerStatus(entity),
-                    color = if (activeGreen) Color(0xFF6FCF7F) else Color(0xFFBBBBBB),
+                    // Green stays semantic (on/locked); the inactive case follows the palette.
+                    color = if (activeGreen) Color(0xFF6FCF7F) else th.subText,
                     fontSize = 14.sp,
                 )
             }
@@ -200,6 +209,7 @@ private fun headerStatus(e: Entity): String = when {
 
 @Composable
 private fun LightControls(entity: Entity, actions: EntityControlActions, firstFocus: FocusRequester) {
+    val th = LocalOverlayTheme.current
     if (entity.supportsBrightness) {
         AdjustableSliderRow(
             label = "Brightness",
@@ -231,7 +241,7 @@ private fun LightControls(entity: Entity, actions: EntityControlActions, firstFo
         var sat by remember(entity.entityId) { mutableDoubleStateOf(entity.hsColor?.second ?: 100.0) }
 
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("Color", color = SubText, fontSize = 13.sp, modifier = Modifier.weight(1f))
+            Text("Color", color = th.subText, fontSize = 13.sp, modifier = Modifier.weight(1f))
             // Live preview of the chosen color.
             Box(
                 Modifier.size(22.dp).clip(CircleShape)
@@ -294,6 +304,7 @@ private fun ClimateControls(entity: Entity, actions: EntityControlActions, first
 @OptIn(ExperimentalTvMaterial3Api::class)
 @Composable
 private fun GenericControls(entity: Entity, actions: EntityControlActions, firstFocus: FocusRequester) {
+    val th = LocalOverlayTheme.current
     if (entity.isButton) {
         AccentButton(
             label = "Press",
@@ -303,7 +314,7 @@ private fun GenericControls(entity: Entity, actions: EntityControlActions, first
         return
     }
     if (entity.isLock) {
-        Text("State: ${cap(entity.state)}", color = Color(0xFFCBD2DA), fontSize = 15.sp)
+        Text("State: ${cap(entity.state)}", color = th.text, fontSize = 15.sp)
         // Explicit action labelled by what the press will DO (toggle picks lock vs unlock by state).
         AccentButton(
             label = if (entity.isLocked) "Unlock" else "Lock",
