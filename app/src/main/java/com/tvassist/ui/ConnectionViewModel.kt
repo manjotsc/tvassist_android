@@ -16,6 +16,7 @@ import com.tvassist.data.settings.Settings
 import com.tvassist.data.settings.SettingsStore
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.FlowPreview
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -286,7 +287,17 @@ class ConnectionViewModel(
             connectionState.collect { state ->
                 if (state is ConnectionState.Connected && closeOnConnect && _setupPin.value != null) {
                     closeOnConnect = false
-                    stopWebOnboarding()
+                    // Let the browser see the result before the server vanishes. The watch page
+                    // polls every 3s, so this guarantees it renders "Connected" (and stops polling)
+                    // rather than being killed mid-request and showing a connection error instead.
+                    delay(WEB_SETUP_CLOSE_DELAY_MS)
+                    // A drop during the wait means the user still needs the console — leave it up
+                    // and re-arm, so it closes on the next successful connection instead.
+                    if (connectionState.value is ConnectionState.Connected) {
+                        stopWebOnboarding()
+                    } else {
+                        closeOnConnect = true
+                    }
                 }
             }
         }
@@ -298,6 +309,9 @@ class ConnectionViewModel(
      * already-connected TV, it must stay up so cameras/maps/backup remain reachable.
      */
     private var closeOnConnect = false
+
+    /** Grace period before the console shuts down, so the browser can render the success. */
+    private val WEB_SETUP_CLOSE_DELAY_MS = 10_000L
 
     /** Start the on-demand Web setup console (idempotent). */
     fun startWebOnboarding() {
