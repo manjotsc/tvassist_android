@@ -893,7 +893,13 @@ class SettingsStore(private val context: Context) {
     // delete the app's OWN backup files there with no permission at all. Both DOWNLOAD (internal
     // Downloads) and USB (a removable volume's Downloads) go through here; "paths" are content:// URIs.
 
-    /** The MediaStore Downloads collection backing [location], or null if unavailable (APP, or no USB). */
+    /**
+     * The MediaStore Downloads collection backing [location], or null if unavailable (APP, or no USB).
+     *
+     * Only reached behind [usesMediaStore]; the annotation states that contract explicitly, since
+     * lint can't follow a guard expressed as a property getter and otherwise reports a false NewApi.
+     */
+    @androidx.annotation.RequiresApi(android.os.Build.VERSION_CODES.Q)
     private fun mediaStoreCollection(location: BackupLocation): Uri? = when (location) {
         BackupLocation.DOWNLOAD -> MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
         BackupLocation.USB -> removableVolumeName()?.let { MediaStore.Downloads.getContentUri(it) }
@@ -901,6 +907,7 @@ class SettingsStore(private val context: Context) {
     }
 
     /** Name of the first removable (USB/SD) MediaStore volume, or null if none is mounted. */
+    @androidx.annotation.RequiresApi(android.os.Build.VERSION_CODES.Q)
     private fun removableVolumeName(): String? =
         MediaStore.getExternalVolumeNames(context)
             .firstOrNull { it != MediaStore.VOLUME_EXTERNAL_PRIMARY }

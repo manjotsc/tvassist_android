@@ -17,6 +17,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
@@ -100,6 +101,23 @@ class HaRepository(
     private fun hostOf(url: String): String? =
         runCatching { java.net.URI(url).host?.lowercase() }.getOrNull()
 
+    /**
+     * Reads a response body, refusing anything over [MAX_BODY_BYTES].
+     *
+     * Decoding is already capped, but the *download* wasn't: a misconfigured camera returning a
+     * huge frame would be pulled fully into memory before any limit applied, which is a real OOM
+     * risk on a TV stick. A body with no declared length is still read — nothing to check against.
+     */
+    private fun okhttp3.Response.cappedBytes(what: String): ByteArray? {
+        val body = this.body ?: return null
+        val len = body.contentLength()
+        if (len > MAX_BODY_BYTES) {
+            Log.w(CAM, "$what: ${len / 1024} KB exceeds cap — skipped")
+            return null
+        }
+        return body.bytes()
+    }
+
     val connectionState: StateFlow<ConnectionState> = client.connectionState
 
     /**
@@ -141,7 +159,9 @@ class HaRepository(
         // Re-dial when the verify-certificate preference changes, so the toggle takes effect without
         // the user having to re-enter credentials. connect() is idempotent per (url, token, tls).
         scope.launch {
-            settingsStore.settings.map { it.verifySsl }.distinctUntilChanged().collect {
+            // drop(1): a StateFlow replays its current value, so without this the collector fires at
+            // startup and races the auto-connect above — two dials, two DNS lookups, every launch.
+            settingsStore.settings.map { it.verifySsl }.distinctUntilChanged().drop(1).collect {
                 val s = settingsStore.settings.first()
                 if (s.baseUrl.isNotBlank() && s.token.isNotBlank()) connect(s.baseUrl, s.token)
             }
@@ -198,7 +218,7 @@ class HaRepository(
                 .build()
             haClient.newCall(req).execute().use { resp ->
                 Log.i(CAM, "snapshot($entityId) code=${resp.code}")
-                if (resp.isSuccessful) resp.body?.bytes() else null
+                if (resp.isSuccessful) resp.cappedBytes("snapshot($entityId)") else null
             }
         }.onFailure { Log.w(CAM, "snapshot error for $entityId", it) }.getOrNull()
     }
@@ -286,7 +306,7 @@ class HaRepository(
             val url = "https://tile.openstreetmap.org/$zoom/$x/$y.png"
             val req = Request.Builder().url(url).header("User-Agent", "TVAssist/1.0 (Android TV)").build()
             httpStrict.newCall(req).execute().use { resp ->
-                if (resp.isSuccessful) resp.body?.bytes()?.let { BitmapFactory.decodeByteArray(it, 0, it.size) } else null
+                if (resp.isSuccessful) resp.cappedBytes("tile")?.let { BitmapFactory.decodeByteArray(it, 0, it.size) } else null
             }
         }.getOrNull()?.also { tileCache.put(key, it) }
     }
@@ -333,7 +353,7 @@ class HaRepository(
         return runCatching {
             val url = "https://tile.googleapis.com/v1/2dtiles/$zoom/$x/$y?session=$session&key=$key"
             httpStrict.newCall(Request.Builder().url(url).build()).execute().use { resp ->
-                if (resp.isSuccessful) resp.body?.bytes()?.let { BitmapFactory.decodeByteArray(it, 0, it.size) } else null
+                if (resp.isSuccessful) resp.cappedBytes("tile")?.let { BitmapFactory.decodeByteArray(it, 0, it.size) } else null
             }
         }.getOrNull()?.also { tileCache.put(cacheKey, it) }
     }
@@ -366,7 +386,7 @@ class HaRepository(
     /** Attribution label for the active map provider (both OSM and Google require attribution). */
     suspend fun mapAttribution(provider: String = "auto"): String =
         if (usesGoogle(provider, settingsStore.settings.first().googleMapsApiKey.isNotBlank())) "Map data ©Google"
-        else "© OpenStreetMap contributors"
+        else "© OpenStreetMap"
 
     /**
      * Builds a map image centered exactly on [lat],[lng] (so a UI marker drawn at the image
@@ -459,7 +479,7 @@ class HaRepository(
         runCatching {
             val req = Request.Builder().url(url).header("Authorization", "Bearer $token").build()
             clientFor(url).newCall(req).execute().use { resp ->
-                if (resp.isSuccessful) resp.body?.bytes()?.let { decodeSampled(it, MAX_AVATAR_PX) } else null
+                if (resp.isSuccessful) resp.cappedBytes("entity_picture")?.let { decodeSampled(it, MAX_AVATAR_PX) } else null
             }
         }.getOrNull()?.also { pictureCache.put(path, it) }
     }
@@ -481,7 +501,7 @@ class HaRepository(
                 .build()
             clientFor(url).newCall(req).execute().use { resp ->
                 Log.i(CAM, "still($url) code=${resp.code}")
-                if (resp.isSuccessful) resp.body?.bytes()?.let { decodeSampled(it, MAX_STILL_PX) } else null
+                if (resp.isSuccessful) resp.cappedBytes("still")?.let { decodeSampled(it, MAX_STILL_PX) } else null
             }
         }.getOrNull()
     }
@@ -508,6 +528,9 @@ class HaRepository(
         // on a 4K panel (density 4) — so 1920 keeps them sharp at ~8 MB peak, while still bounding a
         // 4K camera snapshot that would otherwise decode to ~33 MB and risk an OOM on a TV stick.
         const val MAX_STILL_PX = 1920
+        // Ceiling on a single response body. Generous next to a 4K JPEG (~5 MB) so nothing
+        // legitimate is rejected, but bounded so a broken camera can't OOM the app.
+        const val MAX_BODY_BYTES = 24L * 1024 * 1024
     }
 }
 
