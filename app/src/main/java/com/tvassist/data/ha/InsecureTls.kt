@@ -31,7 +31,14 @@ import javax.net.ssl.X509TrustManager
 object InsecureTls {
     private const val TAG = "HaTls"
 
-    /** Accepts any chain. Only ever installed on a client that passed the [isPrivateHost] gate. */
+    /**
+     * Accepts any chain. Only ever installed on a client that passed the [isPrivateHost] gate.
+     *
+     * Lint's CustomX509TrustManager warning is correct in general and deliberate here: disabling
+     * validation is the entire point of this class. Suppressed so it reads as a decision rather
+     * than an oversight — the safety comes from the private-address gate, not from the manager.
+     */
+    @android.annotation.SuppressLint("CustomX509TrustManager", "TrustAllX509TrustManager")
     private val trustAll = object : X509TrustManager {
         override fun checkClientTrusted(chain: Array<X509Certificate>?, authType: String?) {}
         override fun checkServerTrusted(chain: Array<X509Certificate>?, authType: String?) {}
@@ -55,7 +62,11 @@ object InsecureTls {
     }
 
     /**
-     * True if [url] is `https://` and its host resolves **entirely** to private address space.
+     * True if [url]'s host resolves **entirely** to private address space.
+     *
+     * Scheme-agnostic by design — this answers "is this host on the LAN?", nothing more. The
+     * `https://` requirement is enforced by the caller ([HaRepository.shouldRelaxTls]), together
+     * with the user's verify-certificate preference; all three must hold before TLS is relaxed.
      *
      * Blocking DNS — call from [kotlinx.coroutines.Dispatchers.IO], never the main thread. Returns
      * false if the name doesn't resolve, so a lookup failure fails closed (strict verification).
