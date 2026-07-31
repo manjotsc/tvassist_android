@@ -20,8 +20,10 @@ class SetupWebServer(
     private val onDeleteCamera: (String) -> Unit,
     private val currentMapKey: () -> String,
     private val onSaveMapKey: (String) -> Unit,
-    // "connected" | "connecting" | "disconnected" — shown on the Connection page.
+    // "connected" | "connecting" | "failed" | "disconnected" — shown on the Connection page.
     private val connState: () -> String,
+    /** Failure reason when [connState] is "failed"; blank otherwise. */
+    private val connError: () -> String,
     // TV name/model, shown so you know which TV you're configuring.
     private val deviceName: () -> String,
     // Notification server: (enabled, port), the current push token, and a setter for it.
@@ -98,10 +100,15 @@ class SetupWebServer(
             val verifySsl = f["verify_ssl"] != null
             if (url.isNotEmpty() && token.isNotEmpty()) {
                 onCredentials(url, token, verifySsl)
-                return html(page("Connection", """<div class="ok">Sent to your TV — check the screen for status.</div>${connectionForm()}"""))
+                // Credentials are applied asynchronously (save + WebSocket handshake), so rendering
+                // the status here always caught it mid-flight — showing "Not connected" and an empty
+                // URL a millisecond after submit, with no later render to correct it. Hand off to a
+                // watch view that polls until the TV actually settles.
+                return redirect("/connection?watch=1")
             }
             return html(page("Connection", """<div class="err">Fill in both fields.</div>${connectionForm()}"""))
         }
+        if (req.query["watch"] == "1") return html(watchPage())
         return html(page("Connection", connectionForm()))
     }
 
@@ -293,10 +300,41 @@ class SetupWebServer(
         </script>
     """
 
+    /**
+     * Status-only view shown after submitting credentials, refreshing until the TV settles.
+     *
+     * Deliberately carries no form: the periodic reload would wipe anything half-typed. It also
+     * keeps the retry countdown current, which a one-shot render can't.
+     */
+    private fun watchPage(): String {
+        val state = connState()
+        val settled = state == "connected"
+        val (cls, label) = when (state) {
+            "connected" -> "ok" to "Connected"
+            "connecting" -> "muted" to "Connecting…"
+            "failed" -> "err" to escape(connError().ifBlank { "Not connected" })
+            else -> "muted" to "Sent to your TV — waiting for it to connect…"
+        }
+        val url = prefillUrl()
+        val suffix = if (url.isNotBlank()) " · ${escape(url)}" else ""
+        return page(
+            "Connection",
+            """
+            <div class="$cls">$label$suffix</div>
+            <p class="muted">${if (settled) "You can close this page." else "Updating automatically…"}</p>
+            <form method="get" action="/connection"><button type="submit">Back to connection settings</button></form>
+            """,
+            // Stop reloading once connected; keep polling while connecting or retrying.
+            refreshSecs = if (settled) 0 else 3,
+        )
+    }
+
     private fun connectionForm(): String {
         val (cls, label) = when (connState()) {
             "connected" -> "ok" to "Connected"
             "connecting" -> "muted" to "Connecting…"
+            // Escaped: the reason can carry a server-supplied message (e.g. HA's auth_invalid text).
+            "failed" -> "err" to escape(connError().ifBlank { "Not connected" })
             else -> "err" to "Not connected"
         }
         val url = prefillUrl()
@@ -402,10 +440,21 @@ class SetupWebServer(
           <circle cx="65" cy="50" r="12" fill="#0E9AD6"/>
         </svg>"""
 
-    /** Shared page shell. [home] adds a back link; [showStop] adds the "turn off" footer button. */
-    private fun page(title: String, bodyHtml: String, home: Boolean = true, showStop: Boolean = true): String = """
+    /**
+     * Shared page shell. [home] adds a back link; [showStop] adds the "turn off" footer button;
+     * [refreshSecs] > 0 adds a meta refresh — only ever used on views without a form to fill in,
+     * since a reload would wipe half-typed input.
+     */
+    private fun page(
+        title: String,
+        bodyHtml: String,
+        home: Boolean = true,
+        showStop: Boolean = true,
+        refreshSecs: Int = 0,
+    ): String = """
         <!doctype html><html lang="en"><head>
         <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+        ${if (refreshSecs > 0) """<meta http-equiv="refresh" content="$refreshSecs">""" else ""}
         <title>TVAssist — $title</title>
         <style>
           :root { color-scheme: dark; }
