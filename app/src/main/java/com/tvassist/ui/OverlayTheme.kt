@@ -76,8 +76,10 @@ fun overlayThemeOf(
     val text = if (light) Color(0xFF15181C) else Color(0xFFF2F4F7)
     return OverlayTheme(
         background = Color(bgArgb),
-        // Slightly translucent so the panel background subtly shows through (glass feel).
-        tile = tile.copy(alpha = 0.92f),
+        // Dark tiles are slightly translucent so the panel background shows through (glass feel).
+        // Light tiles stay solid: at 8% transparency the dark app behind the overlay bleeds through
+        // every white tile, which reads as dirty grey panels and ghosted text from the app below.
+        tile = if (light) tile else tile.copy(alpha = 0.92f),
         // Focused surfaces take on the focus color so each item clearly lights up.
         tileFocused = lerp(tile, focus, if (light) 0.20f else 0.26f),
         chip = if (light) tile.darken(0.05f) else tile.lighten(0.10f),
