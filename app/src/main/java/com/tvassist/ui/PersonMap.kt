@@ -318,8 +318,8 @@ fun PersonMapScreen(
         Text(
             "▲▼ zoom · ▶ ${if (mapStyle == "satellite") "satellite" else "roadmap"} · " +
                 "◀ traffic ${if (mapTraffic) "on" else "off"} · BACK to close",
-            color = Color.White.copy(alpha = 0.7f), fontSize = 13.sp,
-            modifier = Modifier.align(Alignment.TopEnd).padding(24.dp),
+            color = Color.White.copy(alpha = 0.85f), fontSize = 13.sp,
+            modifier = Modifier.align(Alignment.TopEnd).padding(24.dp).mapPill(),
         )
 
         // Passive zoom indicator (the D-pad ▲/▼ actually change the zoom; see onPreviewKeyEvent).
@@ -338,8 +338,10 @@ fun PersonMapScreen(
             if (attribution.isNotBlank()) {
                 Text(
                     attribution,
-                    color = Color.White.copy(alpha = 0.6f), fontSize = 10.sp,
-                    modifier = Modifier.align(Alignment.BottomEnd).padding(horizontal = 10.dp, vertical = 6.dp),
+                    // Pilled and opaque enough to actually read: OpenStreetMap's licence asks that
+                    // the credit stay legible, and plain white washed out over light map tiles.
+                    color = Color.White.copy(alpha = 0.85f), fontSize = 10.sp,
+                    modifier = Modifier.align(Alignment.BottomEnd).padding(8.dp).mapPill(),
                 )
             }
         }
@@ -693,19 +695,21 @@ fun PeopleMapScreen(
         Text(
             title,
             color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.SemiBold,
-            modifier = Modifier.align(Alignment.TopStart).padding(24.dp),
+            modifier = Modifier.align(Alignment.TopStart).padding(24.dp).mapPill(),
         )
         Text(
             "▲▼ zoom · ▶ ${if (mapStyle == "satellite") "satellite" else "roadmap"} · " +
                 "◀ traffic ${if (mapTraffic) "on" else "off"} · BACK to close",
-            color = Color.White.copy(alpha = 0.7f), fontSize = 13.sp,
-            modifier = Modifier.align(Alignment.TopEnd).padding(24.dp),
+            color = Color.White.copy(alpha = 0.85f), fontSize = 13.sp,
+            modifier = Modifier.align(Alignment.TopEnd).padding(24.dp).mapPill(),
         )
         if (attribution.isNotBlank()) {
             Text(
                 attribution,
-                color = Color.White.copy(alpha = 0.6f), fontSize = 10.sp,
-                modifier = Modifier.align(Alignment.BottomEnd).padding(horizontal = 10.dp, vertical = 6.dp),
+                // Pilled and opaque enough to actually read: OpenStreetMap's licence asks that the
+                // credit stay legible, and plain white washed out over light map tiles.
+                color = Color.White.copy(alpha = 0.85f), fontSize = 10.sp,
+                modifier = Modifier.align(Alignment.BottomEnd).padding(8.dp).mapPill(),
             )
         }
     }
@@ -844,3 +848,13 @@ private fun distanceLabel(km: Double): String = when {
     km < 1.0 -> "${(km * 1000).roundToInt()} m"
     else -> "${fmt1(km)} km"
 }
+
+/**
+ * Dark rounded backing for text floating over map imagery. Map tiles are light, so plain white text
+ * washes out over them — the zoom indicator and the person info card already use this treatment, so
+ * labels and hints match rather than being the one unreadable element on the screen.
+ */
+private fun Modifier.mapPill(): Modifier = this
+    .clip(RoundedCornerShape(12.dp))
+    .background(Color(0xC00E141C))
+    .padding(horizontal = 10.dp, vertical = 6.dp)
