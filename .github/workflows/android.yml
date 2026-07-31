@@ -26,6 +26,12 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
 
+      # gradlew is committed as mode 100644 because the repo is authored on Windows, where
+      # core.fileMode is false and git never records the executable bit. Linux runners then fail
+      # with "Permission denied" (exit 126). Harmless once the bit is fixed in git.
+      - name: Make gradlew executable
+        run: chmod +x gradlew
+
       - name: Compile
         run: ./gradlew :app:assembleDebug --no-daemon
 
