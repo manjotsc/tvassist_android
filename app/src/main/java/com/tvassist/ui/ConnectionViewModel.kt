@@ -279,11 +279,30 @@ class ConnectionViewModel(
                 repository.connect(stored.baseUrl, stored.token)
             }
         }
+        // Close the onboarding console once the TV is actually connected — the behaviour the README
+        // has always described, but which nothing implemented. Leaves it running when it was opened
+        // from Settings on a connected TV, where it's the only way to reach cameras/maps/backup.
+        viewModelScope.launch {
+            connectionState.collect { state ->
+                if (state is ConnectionState.Connected && closeOnConnect && _setupPin.value != null) {
+                    closeOnConnect = false
+                    stopWebOnboarding()
+                }
+            }
+        }
     }
+
+    /**
+     * True when the console was started while NOT connected, i.e. it's being used to onboard.
+     * Only then does it close itself once the TV connects — started from Settings on an
+     * already-connected TV, it must stay up so cameras/maps/backup remain reachable.
+     */
+    private var closeOnConnect = false
 
     /** Start the on-demand Web setup console (idempotent). */
     fun startWebOnboarding() {
         if (_setupPin.value != null) return // already running or starting up
+        closeOnConnect = connectionState.value !is ConnectionState.Connected
         // Publish the PIN first so no request can slip through the gate before it's live; it also
         // guards the async start below (if it's cleared/changed, we were toggled off meanwhile).
         // Cryptographically-secure so the PIN can't be predicted from the RNG state.
@@ -313,9 +332,13 @@ class ConnectionViewModel(
                     when (connectionState.value) {
                         is ConnectionState.Connected -> "connected"
                         is ConnectionState.Connecting, is ConnectionState.Authenticating -> "connecting"
+                        is ConnectionState.Failed -> "failed"
                         else -> "disconnected"
                     }
                 },
+                // The reason behind a "failed" state, so the phone form can show why rather than a
+                // bare "Not connected" — the same message the TV screen shows.
+                connError = { (connectionState.value as? ConnectionState.Failed)?.reason.orEmpty() },
                 deviceName = { android.os.Build.MODEL ?: "this TV" },
                 notifInfo = { settings.value.notificationsEnabled to settings.value.notificationPort },
                 notifToken = { settings.value.notificationToken },
