@@ -906,12 +906,12 @@ private fun OnboardingSection(
             Spacer(Modifier.height(16.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 AccentButton("Enter on this TV", { manualMode = true })
-                AccentButton("Connect from phone", onStartWeb)
+                AccentButton("Use web setup", onStartWeb)
             }
             Spacer(Modifier.height(10.dp))
             Text(
-                "Typing on a TV remote is painful — \"Connect from phone\" lets you enter your " +
-                    "URL and token from a browser on your phone or laptop.",
+                "Typing on a TV remote is painful — \"Use web setup\" opens a page you can reach " +
+                    "from a browser on your phone or laptop to enter your URL and token.",
                 color = Color(0xFF999999),
                 fontSize = 13.sp,
             )
@@ -3450,9 +3450,9 @@ private fun WebSetupRow(viewModel: ConnectionViewModel, section: String) {
     val running = addr != null
     Row(verticalAlignment = Alignment.CenterVertically) {
         Column(Modifier.weight(1f)) {
-            Text("Set up from phone/laptop", color = TxtPrimary, fontSize = 15.sp)
+            Text("Web setup", color = TxtPrimary, fontSize = 15.sp)
             Text(
-                if (running) "Open $addr on your phone, enter the PIN (TV, bottom-left), then tap $section."
+                if (running) "Open $addr in a browser, enter the PIN (TV, bottom-left), then tap $section."
                 else "Turn on a PIN-protected web console to configure $section (and more) from a browser.",
                 color = if (running) AppAccent else TxtMuted, fontSize = 12.sp,
             )
