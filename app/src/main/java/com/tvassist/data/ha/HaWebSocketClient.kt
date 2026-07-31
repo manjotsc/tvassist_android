@@ -101,6 +101,12 @@ class HaWebSocketClient {
 
     // Command ids we issue during setup so we can recognise their replies.
     @Volatile private var getStatesId = -1
+
+    /**
+     * Why the last attempt failed, kept across retries so the reason stays on screen while the
+     * backoff runs. Null means "no failure yet" — a fresh attempt, which may show "Connecting".
+     */
+    @Volatile private var lastFailure: String? = null
     @Volatile private var subscribeId = -1
 
     // Only these entities are kept/processed (the imported pool). Empty = none tracked.
@@ -202,6 +208,7 @@ class HaWebSocketClient {
         lastToken = accessToken
         deliberate = false
         authFailed = false // a fresh credential clears the bad-token reconnect suppression
+        lastFailure = null // user-initiated attempt: start clean so it shows "Connecting"
         reconnectAttempt = 0
         reconnectJob?.cancel()
         openSocket(baseUrl, accessToken)
@@ -225,7 +232,10 @@ class HaWebSocketClient {
         Log.i(TAG, "connect -> $wsUrl")
         synchronized(entityMap) { entityMap.clear() }
         _entities.value = emptyList()
-        _connectionState.value = ConnectionState.Connecting
+        // Only announce "Connecting" on a fresh attempt. On a retry the previous failure reason must
+        // survive — overwriting it here meant every error flashed for one backoff interval and then
+        // sat as a permanent, uninformative "Connecting" that looked like progress.
+        if (lastFailure == null) _connectionState.value = ConnectionState.Connecting
         msgId.set(0)
         val request = Request.Builder().url(wsUrl).build()
         currentSocket = http.newWebSocket(request, listener)
@@ -234,6 +244,7 @@ class HaWebSocketClient {
     @Synchronized
     fun disconnect() {
         deliberate = true
+        lastFailure = null // a deliberate close isn't a failure; don't let it colour a later dial
         reconnectJob?.cancel()
         reconnectJob = null
         currentSocket?.close(1000, "client disconnect")
@@ -252,6 +263,10 @@ class HaWebSocketClient {
         reconnectAttempt++
         val backoff = (1000L shl (reconnectAttempt - 1).coerceIn(0, 5)).coerceAtMost(30_000L)
         Log.i(TAG, "reconnect #$reconnectAttempt in ${backoff}ms")
+        // Keep the reason visible and say what happens next, rather than silently spinning.
+        lastFailure?.let {
+            _connectionState.value = ConnectionState.Failed("$it · retrying in ${backoff / 1000}s")
+        }
         reconnectJob = publishScope.launch {
             delay(backoff)
             synchronized(this@HaWebSocketClient) { if (!deliberate) openSocket(url, tok) }
@@ -296,6 +311,7 @@ class HaWebSocketClient {
     private val listener = object : WebSocketListener() {
         override fun onOpen(webSocket: WebSocket, response: Response) {
             if (webSocket !== currentSocket) return
+            Log.i(TAG, "socket open (HTTP ${response.code}) — authenticating")
             _connectionState.value = ConnectionState.Authenticating
         }
 
@@ -311,13 +327,16 @@ class HaWebSocketClient {
         override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
             if (webSocket !== currentSocket) return // stale socket being torn down
             Log.w(TAG, "WebSocket failure", t)
-            _connectionState.value = ConnectionState.Failed(failureReason(t))
+            val reason = failureReason(t)
+            lastFailure = reason
+            _connectionState.value = ConnectionState.Failed(reason)
             failPendingResults()
             scheduleReconnect()
         }
 
         override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
             if (webSocket !== currentSocket) return
+            Log.i(TAG, "socket closed (code=$code${if (reason.isNotBlank()) ", $reason" else ""})")
             if (_connectionState.value !is ConnectionState.Failed) {
                 _connectionState.value = ConnectionState.Disconnected
             }
@@ -362,6 +381,7 @@ class HaWebSocketClient {
     private fun handleMessage(ws: WebSocket, msg: JsonObject) {
         when (msg["type"]?.jsonPrimitive?.contentOrNull) {
             "auth_required" -> {
+                Log.i(TAG, "auth_required — sending token")
                 val auth = buildJsonObject {
                     put("type", "auth")
                     put("access_token", token)
@@ -370,6 +390,8 @@ class HaWebSocketClient {
             }
 
             "auth_ok" -> {
+                Log.i(TAG, "auth_ok — connected, requesting states")
+                lastFailure = null // recovered: a later retry should show "Connecting" again
                 _connectionState.value = ConnectionState.Connected
                 reconnectAttempt = 0 // successful connection resets the backoff
                 sendGetStates(ws)
@@ -388,6 +410,7 @@ class HaWebSocketClient {
 
             "auth_invalid" -> {
                 val message = msg["message"]?.jsonPrimitive?.contentOrNull ?: "Invalid token"
+                Log.w(TAG, "auth_invalid: $message")
                 // Stop the reconnect loop: re-sending the same rejected token would just fail again.
                 authFailed = true
                 reconnectJob?.cancel()
@@ -403,6 +426,9 @@ class HaWebSocketClient {
                     id == getStatesId -> {
                         val arr = msg["result"] as? JsonArray ?: return
                         val tracked = trackedIds
+                        // Distinguishes "HA sent nothing" from "nothing imported yet" — the latter
+                        // looks identical in the UI (Connected, but zero entities).
+                        Log.i(TAG, "get_states: ${arr.size} from HA, ${tracked.size} imported/tracked")
                         synchronized(entityMap) {
                             entityMap.clear()
                             for (el in arr) {
