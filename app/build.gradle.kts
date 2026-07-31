@@ -22,8 +22,8 @@ android {
         applicationId = "com.tvassist"
         minSdk = 26
         targetSdk = 35
-        versionCode = 3
-        versionName = "1.1.1"
+        versionCode = 5
+        versionName = "1.1.3"
         // Only package ARM native libs (drop x86/x86_64 — emulator-only) so the universal APK
         // stays as small as possible while still covering 32-bit + 64-bit Android TV devices.
         ndk {
@@ -53,6 +53,16 @@ android {
     }
 
     buildTypes {
+        debug {
+            // x86 for the Android TV emulator, which is x86 (`ro.product.cpu.abilist =
+            // x86,armeabi-v7a,armeabi`). Without it the emulator runs the ARM build under
+            // translation — fine for Kotlin, unreliable for the bundled VLC/native video paths, so
+            // emulator testing doesn't represent a real device. Debug only: release APKs stay
+            // ARM-only and small.
+            ndk {
+                abiFilters += listOf("x86", "x86_64")
+            }
+        }
         release {
             // Shrink + obfuscate with R8. Keep rules live in proguard-rules.pro.
             isMinifyEnabled = true
@@ -68,6 +78,14 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+        }
+    }
+
+    testOptions {
+        unitTests {
+            // android.util.Log throws "not mocked" in pure-JVM tests otherwise, which makes any
+            // logging code path untestable — including InsecureTls's reject branches.
+            isReturnDefaultValues = true
         }
     }
 
