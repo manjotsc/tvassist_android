@@ -133,8 +133,8 @@ fun HaTile(
             containerColor = th.tile,
             focusedContainerColor = th.tileFocused,
             pressedContainerColor = th.tileFocused,
-            contentColor = Color.White,
-            focusedContentColor = Color.White,
+            contentColor = th.text,
+            focusedContentColor = th.text,
         ),
         scale = ClickableSurfaceDefaults.scale(focusedScale = 1.045f),
         border = ClickableSurfaceDefaults.border(
@@ -218,8 +218,8 @@ fun SliderRow(
             .padding(horizontal = 16.dp, vertical = 12.dp),
     ) {
         Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Text(label, color = Color.White, fontSize = 15.sp, modifier = Modifier.weight(1f))
-            Text(if (focused) "◄ $valueText ►" else valueText, color = Color.White, fontSize = 15.sp)
+            Text(label, color = th.text, fontSize = 15.sp, modifier = Modifier.weight(1f))
+            Text(if (focused) "◄ $valueText ►" else valueText, color = th.text, fontSize = 15.sp)
         }
         Spacer(Modifier.height(8.dp))
         TrackBar(pct, Modifier.fillMaxWidth())
@@ -292,10 +292,12 @@ fun AdjustableSliderRow(
             .padding(horizontal = 14.dp, vertical = 9.dp),
     ) {
         Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Text(label, color = Color.White, fontSize = 13.sp, modifier = Modifier.weight(1f))
+            // th.text, not Color.White: on a light palette the tile is white, and white-on-white
+            // made the label and value disappear entirely.
+            Text(label, color = th.text, fontSize = 13.sp, modifier = Modifier.weight(1f))
             Text(
                 if (focused) "◄ ${valueLabel(local)} ►" else valueLabel(local),
-                color = if (focused) th.accent else Color.White,
+                color = if (focused) th.accent else th.text,
                 fontSize = 13.sp,
             )
         }
@@ -356,10 +358,10 @@ fun ColorSliderRow(
             .padding(horizontal = 14.dp, vertical = 9.dp),
     ) {
         Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Text(label, color = Color.White, fontSize = 13.sp, modifier = Modifier.weight(1f))
+            Text(label, color = th.text, fontSize = 13.sp, modifier = Modifier.weight(1f))
             Text(
                 if (focused) "◄ ${valueLabel(local)} ►" else valueLabel(local),
-                color = if (focused) th.accent else Color.White, fontSize = 13.sp,
+                color = if (focused) th.accent else th.text, fontSize = 13.sp,
             )
         }
         Spacer(Modifier.height(6.dp))
@@ -612,8 +614,8 @@ fun InlineClimateTile(
             colors = ClickableSurfaceDefaults.colors(
                 containerColor = Color.Transparent,
                 focusedContainerColor = th.tileFocused,
-                contentColor = Color.White,
-                focusedContentColor = Color.White,
+                contentColor = th.text,
+                focusedContentColor = th.text,
             ),
             // No scale: this header is full-width inside the climate card, so scaling would
             // bulge it past the panel edges. The focus border is the highlight.
