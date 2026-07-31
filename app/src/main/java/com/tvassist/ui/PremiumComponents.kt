@@ -59,16 +59,20 @@ fun AccentButton(
     modifier: Modifier = Modifier,
     leadingIcon: ImageVector? = null,
 ) {
+    // Theme-driven rather than the fixed dark palette: these buttons appear inside the overlay's
+    // control card, where a light theme left dark buttons stranded on a white card. In-app screens
+    // provide no theme, so they fall back to DefaultOverlayTheme and stay dark as before.
+    val th = LocalOverlayTheme.current
     Surface(
         onClick = onClick,
         modifier = modifier,
         shape = ClickableSurfaceDefaults.shape(RoundedCornerShape(14.dp)),
         colors = ClickableSurfaceDefaults.colors(
-            containerColor = ChipDim,
-            focusedContainerColor = CardFocusBg,
-            pressedContainerColor = CardFocusBg,
-            contentColor = TxtPrimary,
-            focusedContentColor = Color.White,
+            containerColor = th.chip,
+            focusedContainerColor = th.tileFocused,
+            pressedContainerColor = th.tileFocused,
+            contentColor = th.text,
+            focusedContentColor = th.text,
         ),
         scale = ClickableSurfaceDefaults.scale(focusedScale = 1.03f),
         border = accentBorder(14),
