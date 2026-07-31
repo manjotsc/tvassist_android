@@ -46,6 +46,7 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -123,8 +124,15 @@ fun SidebarContent(
     val fsEntity = fullscreenId?.let { id -> allEntities.firstOrNull { it.entityId == id } }
     if (fsEntity != null) {
         // A contained popup card over a dim scrim (floats over the app behind the overlay).
+        // The scrim lightens on a light palette — a near-opaque black one under a light theme reads
+        // as a different app entirely. The card itself stays black: it holds video/map imagery.
+        val scrim = if (LocalOverlayTheme.current.background.luminance() > 0.5f) {
+            Color(0x66000000)
+        } else {
+            Color(0xCC000000)
+        }
         Box(
-            modifier = Modifier.fillMaxSize().background(Color(0xCC000000)),
+            modifier = Modifier.fillMaxSize().background(scrim),
             contentAlignment = Alignment.Center,
         ) {
             val cardMod = if (fsEntity.domain == "camera") {
@@ -337,7 +345,7 @@ private fun LayoutRow(
 
     val cols = row.columns.coerceIn(1, 12)
     row.title.takeIf { it.isNotBlank() }?.let {
-        Text(it, color = SubText, fontSize = 13.sp, modifier = Modifier.padding(start = 4.dp, top = 4.dp))
+        Text(it, color = LocalOverlayTheme.current.subText, fontSize = 13.sp, modifier = Modifier.padding(start = 4.dp, top = 4.dp))
     }
     row.tiles.chunked(cols).forEach { line ->
         Row(
@@ -388,8 +396,10 @@ private fun MapCardTile(
         colors = ClickableSurfaceDefaults.colors(
             containerColor = th.tile,
             focusedContainerColor = th.tileFocused,
-            contentColor = Color.White,
-            focusedContentColor = Color.White,
+            // Follows the palette: the container above is themed, so white content vanished on a
+            // light theme (same white-on-white failure as the slider labels).
+            contentColor = th.text,
+            focusedContentColor = th.text,
         ),
         scale = ClickableSurfaceDefaults.scale(focusedScale = 1.045f),
         border = ClickableSurfaceDefaults.border(
