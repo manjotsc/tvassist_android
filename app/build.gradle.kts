@@ -22,8 +22,8 @@ android {
         applicationId = "com.tvassist"
         minSdk = 26
         targetSdk = 35
-        versionCode = 5
-        versionName = "1.1.3"
+        versionCode = 6
+        versionName = "1.1.4"
         // Only package ARM native libs (drop x86/x86_64 — emulator-only) so the universal APK
         // stays as small as possible while still covering 32-bit + 64-bit Android TV devices.
         ndk {
