@@ -353,7 +353,7 @@ class HaWebSocketClient {
      * setting that would fix it. Walks the cause chain, because the interesting exception is
      * usually wrapped a level or two down.
      */
-    private fun failureReason(t: Throwable): String {
+    internal fun failureReason(t: Throwable): String {
         var c: Throwable? = t
         while (c != null) {
             when (c) {
