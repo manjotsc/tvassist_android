@@ -112,7 +112,7 @@ object UpdateChecker {
      * Component-wise numeric comparison. A string compare gets this wrong the first time a component
      * reaches double digits — "1.1.10" sorts *before* "1.1.9" lexically.
      */
-    private fun isNewer(latest: String, current: String): Boolean {
+    internal fun isNewer(latest: String, current: String): Boolean {
         val a = parts(latest)
         val b = parts(current)
         for (i in 0 until maxOf(a.size, b.size)) {
