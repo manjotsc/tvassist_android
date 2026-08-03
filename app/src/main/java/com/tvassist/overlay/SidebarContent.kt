@@ -384,6 +384,7 @@ private fun MapCardTile(
     repository: HaRepository,
     name: String,
     showIcon: Boolean,
+    showStatus: Boolean,
     count: Int,
     onOpen: () -> Unit,
     modifier: Modifier = Modifier,
@@ -406,23 +407,38 @@ private fun MapCardTile(
             focusedBorder = Border(BorderStroke(2.5.dp, th.focus), shape = RoundedCornerShape(18.dp)),
         ),
     ) {
+        // Mirrors HaTile: no text at all means the icon is the only content, so the chip is square
+        // and centred and the tile shrinks to match every other icon-only tile in the row. Without
+        // this the name fell back to "Map" and the count always drew, so hiding Name and Status
+        // still left a text column forcing the tile wider than its neighbours.
+        val subtitle = if (showStatus) (if (count == 1) "1 location" else "$count locations") else ""
+        val hasText = name.isNotBlank() || subtitle.isNotBlank()
+        val iconOnly = showIcon && !hasText
         Row(
-            modifier = Modifier.fillMaxWidth().padding(11.dp),
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 11.dp, vertical = 9.dp),
             verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = if (iconOnly) Arrangement.Center else Arrangement.Start,
         ) {
             if (showIcon) {
                 Box(
-                    modifier = Modifier.size(54.dp, 40.dp).clip(RoundedCornerShape(8.dp)).background(th.chip),
+                    modifier = Modifier.size(if (iconOnly) 36.dp else 54.dp, if (iconOnly) 36.dp else 40.dp)
+                        .clip(RoundedCornerShape(8.dp)).background(th.chip),
                     contentAlignment = Alignment.Center,
                 ) {
                     // Honor a custom icon set under Customize entities (falls back to the map glyph).
                     EntityIconContent(entity, override, th.subText, sizeDp = 22, repository = repository)
                 }
-                Spacer(Modifier.width(11.dp))
             }
-            Column(Modifier.weight(1f)) {
-                Text(name.ifBlank { "Map" }, fontSize = 14.sp, color = th.text, maxLines = 1)
-                Text(if (count == 1) "1 location" else "$count locations", fontSize = 11.sp, color = th.subText, maxLines = 1)
+            if (hasText) {
+                if (showIcon) Spacer(Modifier.width(11.dp))
+                Column(Modifier.weight(1f)) {
+                    if (name.isNotBlank()) {
+                        Text(name, fontSize = 14.sp, color = th.text, maxLines = 1)
+                    }
+                    if (subtitle.isNotBlank()) {
+                        Text(subtitle, fontSize = 11.sp, color = th.subText, maxLines = 1)
+                    }
+                }
             }
         }
     }
@@ -485,6 +501,7 @@ private fun LayoutTile(
             repository = repository,
             name = if (tile.hideName) "" else displayName(entity, override),
             showIcon = !tile.hideIcon,
+            showStatus = !tile.hideStatus,
             count = entity.mapCardMembers.size,
             onOpen = { onLaunchFullscreen(entity) },
             modifier = modifier,
