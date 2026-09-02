@@ -3,6 +3,7 @@ package com.tvassist.data.notify
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /** Pure-JVM tests for the wire-field → object mapping and speak-mode logic. */
@@ -62,6 +63,30 @@ class NotificationServerTest {
 
     @Test fun `empty fields yield a null notification`() {
         assertNull(server().fieldsToNotification(emptyMap()))
+    }
+
+    // ---- id, and Home Assistant's nested `data:` block ----
+
+    @Test fun `fields nested under HA's data block are flattened`() {
+        // How HA's own notify platform shapes a call: message/title at the top, everything else
+        // inside data. Nested keys used to be dropped whole, so the notification showed but with a
+        // generated id and the default duration.
+        val f = server().jsonToFields(
+            """{"message":"Someone at the door","data":{"id":"doorbell","duration":20}}""",
+        )
+        assertEquals("Someone at the door", f["message"])
+        assertEquals("doorbell", f["id"])
+        assertEquals("20", f["duration"])
+    }
+
+    @Test fun `a top-level field wins over a nested one of the same name`() {
+        val f = server().jsonToFields("""{"id":"outer","data":{"id":"inner"}}""")
+        assertEquals("outer", f["id"])
+    }
+
+    @Test fun `a supplied id is used verbatim and a generated one is marked`() {
+        assertEquals("doorbell", server().fieldsToNotification(mapOf("message" to "x", "id" to "doorbell"))!!.id)
+        assertTrue(server().fieldsToNotification(mapOf("message" to "x"))!!.id.startsWith("auto-"))
     }
 
     @Test fun `a bare icon is enough content`() {

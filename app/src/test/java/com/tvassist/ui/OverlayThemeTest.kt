@@ -80,4 +80,23 @@ class OverlayThemeTest {
         assertTrue(light().segmentBg != light().tile)
         assertTrue(dark().segmentBg != dark().tile)
     }
+
+    // --- error text ----------------------------------------------------------------------------
+    // A single hardcoded red shipped in the conversation card and washed out to pink on the light
+    // presets. The colour has to move with the tile, and stay readable against it either way.
+
+    @Test fun `error text differs between light and dark tiles`() {
+        assertTrue(light().errorText != dark().errorText)
+    }
+
+    @Test fun `error text is darker than a light tile and lighter than a dark one`() {
+        assertTrue(light().errorText.luminance() < light().tile.luminance())
+        assertTrue(dark().errorText.luminance() > dark().tile.luminance())
+    }
+
+    @Test fun `error text keeps usable contrast against its tile`() {
+        // Not a full WCAG figure - just enough separation that red-on-tile is not a smudge.
+        assertTrue(abs(light().errorText.luminance() - light().tile.luminance()) > 0.25f)
+        assertTrue(abs(dark().errorText.luminance() - dark().tile.luminance()) > 0.25f)
+    }
 }
