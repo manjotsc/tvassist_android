@@ -178,13 +178,22 @@ private fun alignmentFor(position: String): Alignment = when (position.lowercase
 
 /** Renders the active pushed notifications as themed toasts/banners in their chosen corners. */
 @Composable
-fun NotificationOverlay(items: List<TvNotification>, repository: HaRepository, theme: OverlayTheme) {
+fun NotificationOverlay(
+    items: List<TvNotification>,
+    repository: HaRepository,
+    theme: OverlayTheme,
+    /** How far bottom-anchored pills must sit above the bottom edge — the voice bar's height. */
+    bottomInset: androidx.compose.ui.unit.Dp = 0.dp,
+) {
     CompositionLocalProvider(LocalOverlayTheme provides theme) {
         Box(Modifier.fillMaxSize().padding(18.dp)) {
             items.groupBy { it.position }.forEach { (position, list) ->
                 val fromTop = !position.lowercase().startsWith("bottom")
                 Column(
-                    modifier = Modifier.align(alignmentFor(position)),
+                    modifier = Modifier.align(alignmentFor(position))
+                        // Bottom-anchored pills move up by exactly the bar's measured height while
+                        // it is showing, so the two never overlap and neither guesses at the other.
+                        .padding(bottom = if (fromTop) 0.dp else bottomInset),
                     verticalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
                     list.takeLast(5).forEach { n ->

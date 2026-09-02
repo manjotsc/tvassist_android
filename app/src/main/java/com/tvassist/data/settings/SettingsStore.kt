@@ -45,6 +45,9 @@ data class SettingsBackup(
     val overlayLayout: OverlayLayout = OverlayLayout(),
     val entityOverrides: Map<String, EntityOverride> = emptyMap(),
     val triggerKeyCode: Int = 0,
+    val micKeyCode: Int = 0,
+    val assistMicId: String = "",
+    val assistPipelineId: String = "",
     val autoCloseSeconds: Int = DEFAULT_AUTO_CLOSE_SECONDS,
     val overlayPosition: String = "RIGHT",
     val overlayCornerRadius: Int = 22,
@@ -157,6 +160,20 @@ data class Settings(
     val entityOverrides: Map<String, EntityOverride> = emptyMap(),
     /** KeyEvent keycode that opens the overlay (0 = unset). */
     val triggerKeyCode: Int = 0,
+    /** KeyEvent keycode that opens Assist and starts listening (0 = unset). */
+    val micKeyCode: Int = 0,
+    /**
+     * Which microphone Assist listens with: blank = auto, "recognizer" = the TV's own recogniser
+     * (the only route to a remote's mic), or a "dev:<type>:<name>" audio input. See
+     * [com.tvassist.data.assist.listMicChoices].
+     */
+    val assistMicId: String = "",
+    /**
+     * Which Assist pipeline transcribes speech. Blank means HA's preferred one — which is also the
+     * one that fails when speech-to-text is only configured on some *other* pipeline, so this
+     * exists to reach that one. See [com.tvassist.data.ha.AssistPipeline].
+     */
+    val assistPipelineId: String = "",
     /** Seconds of inactivity before the overlay auto-closes (0 = never). */
     val autoCloseSeconds: Int = DEFAULT_AUTO_CLOSE_SECONDS,
     /** Where the floating overlay docks (enum name). */
@@ -253,7 +270,22 @@ data class Settings(
     val clock24Hour: Boolean = false,
     /** Clock text size in sp. */
     val clockSize: Int = 44,
-)
+) {
+    /**
+     * Whether anything still needs [com.tvassist.overlay.KeepAliveService] running.
+     *
+     * One predicate rather than four copies of the same boolean chain, because the copies had
+     * already drifted apart and the two toggles were the ones that were wrong: turning keep-alive
+     * off stopped the service even when notifications, a dim/clock display or a bound mic key still
+     * depended on it, taking the notification server and the voice bar down with it.
+     *
+     * The mic key belongs here for the same reason it belongs in the boot condition — the voice bar
+     * is drawn by that service's overlay window and by nothing else, so stopping it does not degrade
+     * voice, it makes the button do nothing at all, silently.
+     */
+    val needsKeepAlive: Boolean
+        get() = keepAlive || notificationsEnabled || dimLevel > 0 || clockEnabled || micKeyCode != 0
+}
 
 /** A screen corner for the clock / fixed overlays. */
 enum class DisplayCorner {
@@ -411,6 +443,10 @@ class SettingsStore(private val context: Context) {
                 overlayLayout = readLayout(prefs),
                 entityOverrides = readOverrides(prefs),
                 triggerKeyCode = prefs[KEY_TRIGGER] ?: 0,
+                micKeyCode = prefs[KEY_MIC] ?: 0,
+
+                assistMicId = prefs[KEY_ASSIST_MIC] ?: "",
+                assistPipelineId = prefs[KEY_ASSIST_PIPELINE] ?: "",
                 autoCloseSeconds = prefs[KEY_AUTO_CLOSE] ?: DEFAULT_AUTO_CLOSE_SECONDS,
                 overlayPosition = prefs[KEY_OVERLAY_POSITION] ?: OverlayPosition.RIGHT.name,
                 overlayCornerRadius = prefs[KEY_OVERLAY_CORNER] ?: 22,
@@ -660,6 +696,20 @@ class SettingsStore(private val context: Context) {
 
     suspend fun setTriggerKeyCode(keyCode: Int) {
         context.dataStore.edit { prefs -> prefs[KEY_TRIGGER] = keyCode }
+    }
+
+    suspend fun setMicKeyCode(keyCode: Int) {
+        context.dataStore.edit { prefs -> prefs[KEY_MIC] = keyCode }
+    }
+
+
+
+    suspend fun setAssistMicId(micKey: String) {
+        context.dataStore.edit { prefs -> prefs[KEY_ASSIST_MIC] = micKey }
+    }
+
+    suspend fun setAssistPipelineId(pipelineId: String) {
+        context.dataStore.edit { prefs -> prefs[KEY_ASSIST_PIPELINE] = pipelineId }
     }
 
     suspend fun setAutoCloseSeconds(seconds: Int) {
@@ -1068,7 +1118,10 @@ class SettingsStore(private val context: Context) {
             baseUrl = s.baseUrl, token = secret(s.token), verifySsl = s.verifySsl,
             importedEntityIds = s.importedEntityIds, sidebarEntityIds = s.sidebarEntityIds,
             overlayLayout = s.overlayLayout, entityOverrides = s.entityOverrides,
-            triggerKeyCode = s.triggerKeyCode, autoCloseSeconds = s.autoCloseSeconds,
+            triggerKeyCode = s.triggerKeyCode, micKeyCode = s.micKeyCode,
+            assistMicId = s.assistMicId,
+            assistPipelineId = s.assistPipelineId,
+            autoCloseSeconds = s.autoCloseSeconds,
             overlayPosition = s.overlayPosition, overlayCornerRadius = s.overlayCornerRadius,
             overlayMargin = s.overlayMargin, overlayOpacity = s.overlayOpacity,
             overlayBgColor = s.overlayBgColor, overlayTileColor = s.overlayTileColor,
@@ -1152,6 +1205,10 @@ class SettingsStore(private val context: Context) {
                 prefs[KEY_OVERRIDES] =
                     json.encodeToString(overridesSerializer, backup.entityOverrides)
                 prefs[KEY_TRIGGER] = backup.triggerKeyCode
+                prefs[KEY_MIC] = backup.micKeyCode
+
+                prefs[KEY_ASSIST_MIC] = backup.assistMicId
+                prefs[KEY_ASSIST_PIPELINE] = backup.assistPipelineId
                 prefs[KEY_AUTO_CLOSE] = backup.autoCloseSeconds
                 prefs[KEY_OVERLAY_POSITION] = backup.overlayPosition
                 prefs[KEY_OVERLAY_CORNER] = backup.overlayCornerRadius
@@ -1222,6 +1279,10 @@ class SettingsStore(private val context: Context) {
         // Per-entity overrides (JSON Map<entityId, EntityOverride>).
         val KEY_OVERRIDES = stringPreferencesKey("entity_overrides")
         val KEY_TRIGGER = intPreferencesKey("trigger_key_code")
+        val KEY_MIC = intPreferencesKey("mic_key_code")
+
+        val KEY_ASSIST_MIC = stringPreferencesKey("assist_mic_id")
+        val KEY_ASSIST_PIPELINE = stringPreferencesKey("assist_pipeline_id")
         val KEY_AUTO_CLOSE = intPreferencesKey("auto_close_seconds")
         val KEY_OVERLAY_POSITION = stringPreferencesKey("overlay_position")
         val KEY_OVERLAY_CORNER = intPreferencesKey("overlay_corner_radius")

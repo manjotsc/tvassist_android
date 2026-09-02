@@ -74,13 +74,22 @@ class OverlayService : Service() {
     private var settingsPrimed = false
     // Never dismiss while a fullscreen camera/map is open, even if a stray timer slipped through
     // the scheduling guards — a fullscreen popup is only closed with BACK.
-    private val autoCloseRunnable = Runnable { if (openFullscreenId.value == null) hideSidebar() }
+    private val autoCloseRunnable = Runnable { if (!dismissBlocked()) hideSidebar() }
+
+    /**
+     * True while the sidebar must stay put regardless of inactivity: a fullscreen camera/map is
+     * open, or the Assist card is. Typing a question into Assist produces no D-pad events for the
+     * inactivity timer *and* hands window focus to the soft keyboard, so without this the sidebar
+     * disappears mid-sentence. BACK still closes both.
+     */
+    private fun dismissBlocked(): Boolean =
+        openFullscreenId.value != null || openCardId.value?.startsWith("conversation.") == true
 
     /** (Re)start the inactivity timer that hides the sidebar after [autoCloseMs]. */
     private fun scheduleAutoClose() {
         handler.removeCallbacks(autoCloseRunnable)
-        // Never auto-close while a fullscreen camera/map popup is open.
-        if (openFullscreenId.value != null) return
+        // Never auto-close while a fullscreen popup or the Assist card is open.
+        if (dismissBlocked()) return
         if (autoCloseMs > 0L && overlayView != null) {
             handler.postDelayed(autoCloseRunnable, autoCloseMs)
         }
@@ -110,6 +119,7 @@ class OverlayService : Service() {
             ACTION_SHOW -> showSidebar()
             ACTION_HIDE -> hideSidebar()
             ACTION_TOGGLE -> if (overlayView == null) showSidebar() else hideSidebar()
+            ACTION_ASSIST -> app.voice.trigger()
         }
         return START_STICKY
     }
@@ -118,6 +128,7 @@ class OverlayService : Service() {
         Build.VERSION.SDK_INT < Build.VERSION_CODES.M || Settings.canDrawOverlays(this)
 
     private fun showSidebar() {
+        Log.i(TAG, "sidebar opening")
         if (overlayView != null) return
         if (!canDrawOverlays()) {
             Log.w(TAG, "Overlay permission not granted; cannot show sidebar")
@@ -175,11 +186,14 @@ class OverlayService : Service() {
                         closing = closing,
                         actions = controlActions,
                         onOpenEntity = { openCardId.value = it.entityId },
+                        // Talk goes to the voice bar, which is its own window — so it neither opens
+                        // nor needs the sidebar, and can sit over whatever is already on screen.
+                        onOpenAssist = { app.voice.start() },
                         onLaunchFullscreen = {
                             openFullscreenId.value = it.entityId
                             handler.removeCallbacks(autoCloseRunnable) // don't auto-close while watching
                         },
-                        onCloseCard = { openCardId.value = null },
+                        onCloseCard = { openCardId.value = null; scheduleAutoClose() },
                         onCloseFullscreen = { openFullscreenId.value = null; scheduleAutoClose() },
                     )
                     }
@@ -197,11 +211,14 @@ class OverlayService : Service() {
             onBack = {
                 when {
                     openFullscreenId.value != null -> { openFullscreenId.value = null; scheduleAutoClose() }
-                    openCardId.value != null -> openCardId.value = null
+                    openCardId.value != null -> {
+                        openCardId.value = null
+                        scheduleAutoClose()
+                    }
                     else -> hideSidebar()
                 }
             },
-            onLoseFocus = { if (openFullscreenId.value == null) hideSidebar() },
+            onLoseFocus = { if (!dismissBlocked()) hideSidebar() },
             onInteraction = { scheduleAutoClose() },
         ).apply {
             setViewTreeLifecycleOwner(owner)
@@ -235,7 +252,11 @@ class OverlayService : Service() {
             WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
                 WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
             PixelFormat.TRANSLUCENT,
-        )
+        ).apply {
+            // The Assist card takes typed input, so the IME has to be able to open over this
+            // window and push the panel clear of it rather than sitting on top of the field.
+            softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE
+        }
 
         // The overlay permission can be revoked between the canDrawOverlays() check and here; a
         // failed addView must not crash the service or orphan the Compose lifecycle owner.
@@ -257,6 +278,9 @@ class OverlayService : Service() {
      * stays reliable (BACK / lost focus / auto-close must never leave it stuck).
      */
     private fun hideSidebar() {
+        // Why it closed is the useful half: a sidebar that "vanishes on its own" is almost
+        // always the inactivity timer, and that is indistinguishable from a crash without this.
+        Log.i(TAG, "sidebar closing")
         if (overlayView == null) return
         val look = appearance.value
         val animate = look.animStyle != com.tvassist.data.settings.OVERLAY_ANIM_NONE &&
@@ -314,6 +338,7 @@ class OverlayService : Service() {
         const val ACTION_SHOW = "com.tvassist.overlay.SHOW"
         const val ACTION_HIDE = "com.tvassist.overlay.HIDE"
         const val ACTION_TOGGLE = "com.tvassist.overlay.TOGGLE"
+        const val ACTION_ASSIST = "com.tvassist.overlay.ASSIST"
 
         private const val TAG = "OverlayService"
         private const val CHANNEL_ID = "tv_assist_overlay"
@@ -322,6 +347,9 @@ class OverlayService : Service() {
         fun toggle(context: Context) = send(context, ACTION_TOGGLE)
         fun show(context: Context) = send(context, ACTION_SHOW)
         fun hide(context: Context) = send(context, ACTION_HIDE)
+
+        /** Opens the Assist card with the mic live (the mic trigger key). */
+        fun assist(context: Context) = send(context, ACTION_ASSIST)
 
         private fun send(context: Context, action: String) {
             val intent = Intent(context, OverlayService::class.java).setAction(action)

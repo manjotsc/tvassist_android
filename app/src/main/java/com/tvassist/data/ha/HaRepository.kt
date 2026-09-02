@@ -60,6 +60,13 @@ class HaRepository(
     private var baseUrl: String = ""
     @Volatile
     private var token: String = ""
+
+    /**
+     * Values the log capture must scrub before storing a line. Deliberately returns the secrets to
+     * *remove* rather than exposing [token] as a getter — the only caller wants to redact them, and
+     * a public token accessor is a much larger door than that needs.
+     */
+    internal fun secretsToRedact(): List<String> = listOf(token).filter { it.isNotBlank() }
     private fun httpBuilder() = OkHttpClient.Builder()
         .callTimeout(8, TimeUnit.SECONDS)
         // Map tiles all come from one host; raise the per-host cap so the grid fetches in parallel
@@ -233,6 +240,73 @@ class HaRepository(
         entityId: String,
         data: Map<String, kotlinx.serialization.json.JsonElement>? = null,
     ) = client.callService(domain, service, entityId, data)
+
+    /**
+     * Asks a Home Assistant `conversation` agent something and waits for its answer.
+     *
+     * [agentId] is the conversation entity's id (e.g. `conversation.home_assistant`). Pass the
+     * [conversationId] from the previous reply to continue the same thread, so follow-ups like
+     * "turn it off" still know what "it" is; null starts a fresh one.
+     */
+    suspend fun converse(
+        agentId: String,
+        text: String,
+        conversationId: String? = null,
+        language: String = "",
+    ): ConversationReply {
+        val data = buildMap<String, kotlinx.serialization.json.JsonElement> {
+            put("text", JsonPrimitive(text))
+            // Omitted rather than blank when unknown: HA then falls back to its default agent, which
+            // is a working answer. An empty agent_id is rejected outright.
+            if (agentId.isNotBlank()) put("agent_id", JsonPrimitive(agentId))
+            if (!conversationId.isNullOrBlank()) put("conversation_id", JsonPrimitive(conversationId))
+            if (language.isNotBlank()) put("language", JsonPrimitive(language))
+        }
+        // Diagnostic for follow-ups. A blank agentId means no agent_id goes on the wire and HA
+        // answers with its DEFAULT agent, not the pipeline's — which silently turns an LLM thread
+        // into an intent matcher that cannot resolve "what did I just say". Logs whether a thread
+        // was continued for the same reason: both halves have to be right for a follow-up to work.
+        Log.i(
+            ASSIST,
+            "converse agent=${agentId.ifBlank { "<default>" }} " +
+                "thread=${if (conversationId.isNullOrBlank()) "new" else "continued"}",
+        )
+        val msg = client.callServiceForResponse(
+            "conversation", "process", data, HaWebSocketClient.CONVERSATION_TIMEOUT_MS,
+        )
+        val reply = ConversationReply.fromResultMessage(msg)
+        Log.i(
+            ASSIST,
+            "converse reply type=${reply.responseType.ifBlank { "<none>" }} " +
+                "error=${reply.isError} thread=${if (reply.conversationId.isNullOrBlank()) "none" else "returned"} " +
+                "chars=${reply.speech.length}",
+        )
+        return reply
+    }
+
+    // --- Assist pipeline (voice). Thin pass-throughs so callers need not reach past the repo. ---
+
+    /** Starts a voice run; see [HaWebSocketClient.startAssistPipeline]. */
+    fun startAssistPipeline(
+        pipelineId: String,
+        endAtTts: Boolean,
+        conversationId: String?,
+        /** Non-null answers this text from the `intent` stage instead of streaming audio. */
+        text: String? = null,
+        onEvent: (kotlinx.serialization.json.JsonObject) -> Unit,
+    ): Int? = client.startAssistPipeline(pipelineId, endAtTts, conversationId, text, onEvent)
+
+    /** The Assist pipelines configured on this instance, for the settings picker. */
+    suspend fun fetchAssistPipelines(): AssistPipelines? = client.fetchAssistPipelines()
+
+
+
+    fun sendAssistAudio(handlerId: Int, pcm: ByteArray, length: Int): Boolean =
+        client.sendAssistAudio(handlerId, pcm, length)
+
+    fun endAssistAudio(handlerId: Int): Boolean = client.endAssistAudio(handlerId)
+
+    fun stopAssistPipeline(id: Int) = client.stopAssistPipeline(id)
 
     /** Fetches ALL entities once (for the import picker); not added to the tracked set. */
     suspend fun fetchAllStates(): List<Entity> = client.fetchAllStates()
@@ -464,13 +538,54 @@ class HaRepository(
     // Cache for entity pictures (avatars), keyed by their relative/absolute path.
     private val pictureCache = android.util.LruCache<String, Bitmap>(24)
 
-    /** Resolves a relative HA path against [baseUrl]; absolute http(s) URLs pass through. */
-    private fun absoluteUrl(path: String): String? {
+    /**
+     * Resolves a relative HA path against [baseUrl]; absolute http(s) URLs pass through.
+     *
+     * Public because a pipeline's `tts_output.url` needs it too — Home Assistant reports that as a
+     * bare path more often than not, and an ExoPlayer handed "/api/tts_proxy/…" has nothing to
+     * resolve it against.
+     */
+    fun absoluteUrl(path: String): String? {
+        if (path.isBlank()) return null
         if (path.startsWith("http")) return path
         val base = baseUrl
         if (base.isBlank()) return null
         return base + (if (path.startsWith("/")) path else "/$path")
     }
+
+    /**
+     * Asks Home Assistant to synthesise [message] with [engineId], and returns a playable URL.
+     *
+     * The recogniser route needs this. It never runs a pipeline — the TV transcribes and the app puts
+     * the text to `conversation.process` itself — so no `tts-end` event ever arrives with audio, and
+     * without this a question asked through a BRAVIA's remote could only ever be answered in writing.
+     */
+    suspend fun ttsUrl(engineId: String, message: String, language: String = ""): String? =
+        withContext(Dispatchers.IO) {
+            val base = baseUrl
+            if (base.isBlank() || token.isBlank() || engineId.isBlank() || message.isBlank()) {
+                return@withContext null
+            }
+            runCatching {
+                val payload = buildJsonObject {
+                    put("engine_id", JsonPrimitive(engineId))
+                    put("message", JsonPrimitive(message))
+                    if (language.isNotBlank()) put("language", JsonPrimitive(language))
+                }.toString()
+                val url = "$base/api/tts_get_url"
+                val req = Request.Builder().url(url)
+                    .header("Authorization", "Bearer $token")
+                    .post(payload.toRequestBody("application/json".toMediaType()))
+                    .build()
+                clientFor(url).newCall(req).execute().use { resp ->
+                    if (!resp.isSuccessful) {
+                        Log.w(CAM, "tts_get_url failed: ${resp.code}")
+                        return@use null
+                    }
+                    parseTtsUrl(resp.body?.string())
+                }
+            }.onFailure { Log.w(CAM, "tts_get_url error", it) }.getOrNull()?.let { absoluteUrl(it) }
+        }
 
     /** Fetches an entity_picture (avatar) by its HA path, authenticated, or null. */
     suspend fun fetchEntityPicture(path: String): Bitmap? = withContext(Dispatchers.IO) {
@@ -522,6 +637,9 @@ class HaRepository(
 
     private companion object {
         const val CAM = "HaCamera"
+
+        /** Assist/conversation diagnostics — agent chosen, thread continuity, reply shape. */
+        const val ASSIST = "HaAssist"
         // Longest-edge cap for cached avatars; plenty for list icons and person-map markers.
         const val MAX_AVATAR_PX = 256
         // Longest-edge cap for notification stills. The card draws them up to 460dp wide — ~1840px

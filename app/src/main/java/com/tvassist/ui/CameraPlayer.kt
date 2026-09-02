@@ -42,6 +42,7 @@ import androidx.media3.exoplayer.ExoPlayer
 import androidx.tv.material3.Text
 import com.tvassist.data.ha.Entity
 import com.tvassist.data.ha.HaRepository
+import com.tvassist.data.ha.safeUrlForLog
 
 /**
  * Fullscreen live camera view. Plays the camera's HLS stream with ExoPlayer rendered into a
@@ -141,7 +142,13 @@ fun CameraPlayerScreen(entity: Entity, repository: HaRepository, onBack: () -> U
                             }
                         }
                         override fun onPlayerError(error: PlaybackException) {
-                            android.util.Log.w("HaCamera", "exo error: ${error.errorCodeName}", error)
+                            // Same shape as the StreamVideo paths, so one grep for "stream failed"
+                            // finds every engine's version of this.
+                            android.util.Log.w(
+                                "HaCamera",
+                                "stream failed (exoplayer): ${safeUrlForLog(u)} — " +
+                                    "${error.errorCodeName}: ${error.message}",
+                            )
                             // A rolling-clip cam shouldn't die on a transient blip — retry instead of giving up.
                             if (reloadOnEnd) main.postDelayed({ refetch() }, 1000) else failed = true
                         }

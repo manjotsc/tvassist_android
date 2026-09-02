@@ -55,6 +55,18 @@ val DefaultOverlayTheme = OverlayTheme(
 
 val LocalOverlayTheme = staticCompositionLocalOf { DefaultOverlayTheme }
 
+/**
+ * Red for a failed answer — darkened on a pale surface rather than paled, so it stays legible on
+ * both. A single hardcoded red cannot: on Daylight/Linen/Paper/Mint the usual light red washes out
+ * to pink on near-white, and a dark enough red to fix that is unreadable on OLED.
+ *
+ * Keyed on [tile] rather than [background] because error text is always drawn on a tile — the
+ * transcript's segment, the voice bar's body — which is the same surface [text] and [subText] are
+ * derived from.
+ */
+val OverlayTheme.errorText: Color
+    get() = if (tile.luminance() > 0.5f) Color(0xFFB3261E) else Color(0xFFEF8A8A)
+
 private fun Color.lighten(f: Float): Color = lerp(this, Color.White, f)
 
 /** Builds a full [OverlayTheme] from the user-chosen colors (ARGB ints). */

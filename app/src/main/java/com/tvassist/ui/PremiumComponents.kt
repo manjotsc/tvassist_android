@@ -58,6 +58,8 @@ fun AccentButton(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     leadingIcon: ImageVector? = null,
+    /** Same knob as [ChipButton]: trades presence for vertical space on a screen that needs it. */
+    dense: Boolean = false,
 ) {
     // Theme-driven rather than the fixed dark palette: these buttons appear inside the overlay's
     // control card, where a light theme left dark buttons stranded on a white card. In-app screens
@@ -66,7 +68,7 @@ fun AccentButton(
     Surface(
         onClick = onClick,
         modifier = modifier,
-        shape = ClickableSurfaceDefaults.shape(RoundedCornerShape(14.dp)),
+        shape = ClickableSurfaceDefaults.shape(RoundedCornerShape(if (dense) 12.dp else 14.dp)),
         colors = ClickableSurfaceDefaults.colors(
             containerColor = th.chip,
             focusedContainerColor = th.tileFocused,
@@ -75,17 +77,18 @@ fun AccentButton(
             focusedContentColor = th.text,
         ),
         scale = ClickableSurfaceDefaults.scale(focusedScale = 1.03f),
-        border = accentBorder(14),
+        border = accentBorder(if (dense) 12 else 14),
     ) {
         Row(
-            modifier = Modifier.padding(horizontal = 18.dp, vertical = 12.dp),
+            modifier = if (dense) Modifier.padding(horizontal = 12.dp, vertical = 7.dp)
+            else Modifier.padding(horizontal = 18.dp, vertical = 12.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             if (leadingIcon != null) {
-                Icon(leadingIcon, contentDescription = null, modifier = Modifier.size(18.dp))
-                Spacer(Modifier.width(8.dp))
+                Icon(leadingIcon, contentDescription = null, modifier = Modifier.size(if (dense) 15.dp else 18.dp))
+                Spacer(Modifier.width(if (dense) 6.dp else 8.dp))
             }
-            Text(label, fontSize = 15.sp, fontWeight = FontWeight.Medium)
+            Text(label, fontSize = if (dense) 13.sp else 15.sp, fontWeight = FontWeight.Medium)
         }
     }
 }

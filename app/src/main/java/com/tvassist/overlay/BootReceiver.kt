@@ -28,8 +28,9 @@ class BootReceiver : BroadcastReceiver() {
         CoroutineScope(Dispatchers.IO).launch {
             try {
                 val s = runCatching { app.settingsStore.settings.first() }.getOrNull()
-                val wantDisplay = s != null && (s.dimLevel > 0 || s.clockEnabled)
-                if (s == null || s.keepAlive || s.notificationsEnabled || wantDisplay) {
+                // A settings read that failed starts it anyway: coming back from a reboot with no
+                // overlay is worse than running a service this TV did not need.
+                if (s == null || s.needsKeepAlive) {
                     runCatching { KeepAliveService.start(context) }
                 }
             } finally {

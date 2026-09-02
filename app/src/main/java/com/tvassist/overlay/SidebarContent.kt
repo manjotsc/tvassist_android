@@ -88,6 +88,7 @@ import com.tvassist.ui.domainIcon
 import com.tvassist.ui.fmt
 import com.tvassist.ui.performPress
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 
 /**
@@ -108,6 +109,14 @@ fun SidebarContent(
     closing: StateFlow<Boolean>,
     actions: EntityControlActions,
     onOpenEntity: (Entity) -> Unit,
+    /**
+     * Starts a spoken exchange with a conversation agent (the Talk press action).
+     *
+     * Required rather than defaulting to [onOpenEntity]: a caller that forgot to wire Talk would
+     * then silently open the entity's card instead, which looks like a working button doing the
+     * wrong thing. Making it required turns that into a compile error.
+     */
+    onOpenAssist: (Entity) -> Unit,
     onLaunchFullscreen: (Entity) -> Unit,
     onCloseCard: () -> Unit,
     onCloseFullscreen: () -> Unit,
@@ -291,6 +300,7 @@ fun SidebarContent(
                             overrideMap = overrideMap,
                             actions = actions,
                             onOpenEntity = onOpenEntity,
+                            onOpenAssist = onOpenAssist,
                             onLaunchFullscreen = onLaunchFullscreen,
                             repository = repository,
                             firstTileId = firstTileId,
@@ -310,6 +320,8 @@ private fun LayoutRow(
     overrideMap: Map<String, EntityOverride>,
     actions: EntityControlActions,
     onOpenEntity: (Entity) -> Unit,
+    /** Starts a spoken exchange with a conversation agent (the Talk press action). */
+    onOpenAssist: (Entity) -> Unit,
     onLaunchFullscreen: (Entity) -> Unit,
     repository: HaRepository,
     firstTileId: String?,
@@ -363,6 +375,7 @@ private fun LayoutRow(
                     override = overrideMap[tile.entityId],
                     actions = actions,
                     onOpenEntity = onOpenEntity,
+                    onOpenAssist = onOpenAssist,
                     onLaunchFullscreen = onLaunchFullscreen,
                     repository = repository,
                     resolve = { byId[it] },
@@ -488,6 +501,8 @@ private fun LayoutTile(
     override: EntityOverride?,
     actions: EntityControlActions,
     onOpenEntity: (Entity) -> Unit,
+    /** Starts a spoken exchange with a conversation agent (the Talk press action). */
+    onOpenAssist: (Entity) -> Unit,
     onLaunchFullscreen: (Entity) -> Unit,
     repository: HaRepository,
     resolve: (String) -> Entity?,
@@ -523,11 +538,11 @@ private fun LayoutTile(
     // Camera/person open a fullscreen view (in the app); others run the configured actions.
     val primary: () -> Unit = when {
         entity.domain == "camera" || entity.isPerson -> ({ onLaunchFullscreen(entity) })
-        else -> ({ performPress(override?.singlePress ?: "default", entity, actions, onOpenEntity, single = true) })
+        else -> ({ performPress(override?.singlePress ?: "default", entity, actions, onOpenEntity, single = true, openVoice = onOpenAssist) })
     }
     val more: () -> Unit = when {
         entity.domain == "camera" || entity.isPerson -> ({ onLaunchFullscreen(entity) })
-        else -> ({ performPress(override?.longPress ?: "default", entity, actions, onOpenEntity, single = false) })
+        else -> ({ performPress(override?.longPress ?: "default", entity, actions, onOpenEntity, single = false, openVoice = onOpenAssist) })
     }
 
     when (effectiveStyle) {
@@ -586,6 +601,8 @@ private fun LayoutTile(
 /** Short status line shown under a tile title. */
 private fun tileSubtitle(e: Entity): String = when {
     e.isButton -> ""
+    // Its raw state is an ISO timestamp of the last use, which is unreadable on a tile.
+    e.isConversation -> "Assist"
     e.domain == "light" -> if (e.isOn) (e.brightnessPct?.let { "$it%" } ?: "On") else "Off"
     e.domain == "climate" -> e.currentTemperature?.let { "${cap(e.state)} · ${fmt(it)}°" } ?: cap(e.state)
     e.domain == "switch" || e.domain == "input_boolean" || e.domain == "fan" -> if (e.isOn) "On" else "Off"

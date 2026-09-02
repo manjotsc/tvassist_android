@@ -45,6 +45,13 @@ data class Entity(
     /** Location-tracked entities (person / device_tracker). */
     val isPerson: Boolean get() = domain == "person" || domain == "device_tracker"
 
+    /**
+     * A Home Assistant conversation agent (Assist). It has no on/off — its state is just the last
+     * time it was used — so it is neither toggleable nor a button: pressing its tile opens the card
+     * where you actually talk to it.
+     */
+    val isConversation: Boolean get() = domain == "conversation"
+
     // --- App-defined local cameras (not HA-backed): stream/snapshot URLs live in attributes. ---
     val localStreamUrl: String? get() = attributes.str("ta_stream_url")
     val localSnapshotUrl: String? get() = attributes.str("ta_snapshot_url")

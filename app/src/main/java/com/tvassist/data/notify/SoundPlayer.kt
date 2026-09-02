@@ -13,9 +13,16 @@ import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import androidx.media3.common.MediaItem
+import androidx.media3.common.MimeTypes
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
+import androidx.media3.common.util.UnstableApi
+import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.Renderer
+import androidx.media3.exoplayer.mediacodec.MediaCodecSelector
+import androidx.media3.exoplayer.mediacodec.MediaCodecUtil
+import androidx.media3.exoplayer.video.VideoRendererEventListener
 import java.io.ByteArrayOutputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -47,16 +54,29 @@ class SoundPlayer(context: Context) {
     // Bumped on every play(); a caller's stop(token) is honored only while its token is still current,
     // so a lingering lifecycle watcher for an old sound can't stop a newer one that replaced it.
     @Volatile private var token = 0L
+    // Run once when the current sound ends of its own accord. Lets a caller follow the audio rather
+    // than guess its length — the Assist bar dismisses itself when the spoken reply finishes.
+    @Volatile private var onFinished: (() -> Unit)? = null
 
     /**
      * [volume] is 0–100 (relative to the TV volume); [duckMode] = "off" / "duck" / "pause". When
      * [loop] is true the file repeats gaplessly until [stop] (or a new play) — used to sound for a
      * notification's whole on-screen life. Returns a token to pass to [stop].
+     *
+     * [onFinished] runs when playback ends on its own — not when [stop] or a newer play cuts it
+     * short, and never for a [loop]ing sound, which by definition does not end.
      */
-    fun play(url: String, volume: Int? = null, duckMode: String = "duck", loop: Boolean = false): Long {
+    fun play(
+        url: String,
+        volume: Int? = null,
+        duckMode: String = "duck",
+        loop: Boolean = false,
+        onFinished: (() -> Unit)? = null,
+    ): Long {
         if (url.isBlank()) return 0L
         val t = System.nanoTime()
         token = t
+        this.onFinished = onFinished
         if (loop) {
             // Try the gapless PCM path off the main thread; fall back to ExoPlayer if unsuitable.
             io.execute {
@@ -76,6 +96,8 @@ class SoundPlayer(context: Context) {
 
     /** Stop the current sound (either engine), but only if [t] is still current (see [token]). */
     fun stop(t: Long) {
+        // Stopped audio never "finished"; the caller cut it short deliberately.
+        if (t == token) onFinished = null
         io.execute { if (t == token) releaseTrack() }
         main.post { if (t == token) finish() }
     }
@@ -86,9 +108,11 @@ class SoundPlayer(context: Context) {
         if (token != t) return
         runCatching {
             releaseTrack()
-            releasePlayer()
             requestFocus(duckMode)
-            val p = ExoPlayer.Builder(appContext).build()
+            val p = ensurePlayer()
+            // Reused, so anything the last sound set has to be undone rather than assumed.
+            p.stop()
+            p.clearMediaItems()
             val item = MediaItem.fromUri(url)
             if (loop) {
                 // Loop via a 2-item playlist + REPEAT_MODE_ALL rather than REPEAT_MODE_ONE: ExoPlayer
@@ -98,19 +122,10 @@ class SoundPlayer(context: Context) {
                 p.repeatMode = Player.REPEAT_MODE_ALL
             } else {
                 p.setMediaItem(item)
+                // A previous looping sound would otherwise leave this player repeating forever.
+                p.repeatMode = Player.REPEAT_MODE_OFF
             }
             p.volume = gain(volume)
-            p.addListener(object : Player.Listener {
-                override fun onPlaybackStateChanged(state: Int) {
-                    // A looping player never reports ENDED; it stops via stop()/a new play().
-                    if (state == Player.STATE_ENDED) main.post { finish() }
-                }
-                override fun onPlayerError(error: PlaybackException) {
-                    Log.w(TAG, "sound playback failed: ${error.message}")
-                    main.post { finish() }
-                }
-            })
-            player = p
             p.prepare()
             p.playWhenReady = true
         }.onFailure { Log.w(TAG, "sound play error", it); abandonFocus() }
@@ -119,7 +134,7 @@ class SoundPlayer(context: Context) {
     // --- Gapless PCM loop path (io thread) ---------------------------------------------------------
 
     private fun playLoopingPcm(url: String, pcm: Pcm, volume: Int?, duckMode: String, t: Long) {
-        main.post { releasePlayer() } // stop any ExoPlayer that was running
+        main.post { stopPlayer() } // silence any ExoPlayer that was running
         releaseTrack()
         requestFocus(duckMode)
         val at = runCatching { buildLoopingTrack(pcm, volume) }.getOrNull()
@@ -258,13 +273,74 @@ class SoundPlayer(context: Context) {
 
     private fun finish() {
         abandonFocus()
-        releasePlayer()
+        stopPlayer()
         releaseTrack()
+        // Taken before invoking: a callback that starts new audio must not be re-run by it.
+        onFinished.also { onFinished = null }?.invoke()
     }
 
-    private fun releasePlayer() {
-        player?.let { runCatching { it.release() } }
-        player = null
+    /**
+     * The one player, built on first use and then kept.
+     *
+     * Building an [ExoPlayer] enumerates the device's codecs, and on a Mediatek BRAVIA that took
+     * **2.6 seconds** — measured between `ExoPlayerImpl Init` and `MtkACodecPlugin createAPlugin` in
+     * a real voice exchange — on the main thread, before a short MP3 could start. It was paid on
+     * every notification sound and every spoken Assist reply, because the player was built and
+     * released around each one.
+     *
+     * The renderers factory is audio-only for the same reason: the default one enumerates video
+     * codecs too, and the log of that 2.6 seconds is mostly `Unsupported mime video/dolby-vision`,
+     * `video/x-vp6`, `mpeg2 profile 4` and friends — none of which can appear in a doorbell chime.
+     */
+    @OptIn(UnstableApi::class)
+    private fun ensurePlayer(): ExoPlayer = player ?: ExoPlayer
+        .Builder(appContext, AudioOnlyRenderersFactory(appContext))
+        .build()
+        .also { p ->
+            p.addListener(object : Player.Listener {
+                override fun onPlaybackStateChanged(state: Int) {
+                    // A looping player never reports ENDED; it stops via stop()/a new play().
+                    if (state == Player.STATE_ENDED) main.post { finish() }
+                }
+                override fun onPlayerError(error: PlaybackException) {
+                    Log.w(TAG, "sound playback failed: ${error.message}")
+                    main.post { finish() }
+                }
+            })
+            player = p
+        }
+
+    /**
+     * Pays the codec enumeration ahead of time, so the first sound of the day is as quick as the
+     * rest. Called at start-up beside the text-to-speech warm-up, which exists for the same reason.
+     *
+     * Two halves, because the cost is in two places. Building the player is cheap once the video
+     * renderers are gone; the expensive part is the decoder lookup, which media3 does lazily inside
+     * `prepare()` — on the main thread, while somebody is waiting for an answer. [MediaCodecUtil]
+     * caches its results statically, so asking it here once, off the main thread, means the first
+     * real playback finds them already there.
+     */
+    fun warmUp() {
+        main.post { runCatching { ensurePlayer() }.onFailure { Log.w(TAG, "player warm-up failed", it) } }
+        io.execute {
+            // The two the TV will actually be handed: Home Assistant's tts_proxy serves mp3, and
+            // notification media is commonly AAC.
+            for (mime in listOf(MimeTypes.AUDIO_MPEG, MimeTypes.AUDIO_AAC)) {
+                runCatching { warmDecoders(mime) }
+                    .onFailure { Log.w(TAG, "decoder warm-up failed for $mime", it) }
+            }
+        }
+    }
+
+    @OptIn(UnstableApi::class)
+    private fun warmDecoders(mime: String) {
+        // The return value is thrown away on purpose — the point is the static cache it fills.
+        MediaCodecUtil.getDecoderInfos(mime, false, false)
+    }
+
+    /** Ends playback but keeps the player — see [ensurePlayer] for why it is not released. */
+    private fun stopPlayer() {
+        player?.let { runCatching { it.stop(); it.clearMediaItems() } }
     }
 
     private fun releaseTrack() {
@@ -311,5 +387,29 @@ class SoundPlayer(context: Context) {
         private const val MAX_PCM_BYTES = 4_000_000
         // 16-bit amplitude below this counts as silence when trimming padding (~-54 dBFS).
         private const val SILENCE_THRESHOLD = 64
+    }
+}
+
+/**
+ * An [ExoPlayer] renderers factory that builds no video renderers.
+ *
+ * This app's [SoundPlayer] plays chimes and synthesised speech and nothing else, but the default
+ * factory asks the platform about every video codec it might ever need — dolby-vision, mpeg2, vp6,
+ * wmv, mjpeg — and on a Mediatek BRAVIA that scan is where most of a 2.6 second cold start went.
+ * Skipping it is the difference between a reply that answers and one that arrives late.
+ */
+@UnstableApi
+private class AudioOnlyRenderersFactory(context: Context) : DefaultRenderersFactory(context) {
+    override fun buildVideoRenderers(
+        context: Context,
+        extensionRendererMode: Int,
+        mediaCodecSelector: MediaCodecSelector,
+        enableDecoderFallback: Boolean,
+        eventHandler: android.os.Handler,
+        eventListener: VideoRendererEventListener,
+        allowedVideoJoiningTimeMs: Long,
+        out: ArrayList<Renderer>,
+    ) {
+        // Deliberately none.
     }
 }

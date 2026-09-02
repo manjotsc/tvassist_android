@@ -25,6 +25,7 @@ import okhttp3.Request
 import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
+import okio.ByteString.Companion.toByteString
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.TimeUnit
@@ -113,10 +114,19 @@ class HaWebSocketClient {
     @Volatile
     private var trackedIds: Set<String> = emptySet()
 
-    // Pending one-shot requests (camera stream / full state fetch), keyed by message id so
-    // concurrent callers don't clobber each other and each reply is routed to its own waiter.
-    // The callback receives the reply's `result` element, or null if the socket drops first.
-    private val pendingResults = ConcurrentHashMap<Int, (JsonElement?) -> Unit>()
+    // Pending one-shot requests (camera stream / full state fetch / response-returning service
+    // calls), keyed by message id so concurrent callers don't clobber each other and each reply is
+    // routed to its own waiter. The callback receives the whole `result` MESSAGE — not just its
+    // `result` field — so a caller can also read HA's `error.message` when success is false. Null
+    // means the socket dropped (or the request timed out) before any reply arrived.
+    private val pendingResults = ConcurrentHashMap<Int, (JsonObject?) -> Unit>()
+
+    // Assist pipeline runs. Unlike [pendingResults] these stay registered for the whole run: HA
+    // streams many `event` messages under the one command id and only then stops.
+    private val eventSubscriptions = ConcurrentHashMap<Int, (JsonObject) -> Unit>()
+
+    /** Scratch frame for [sendAssistAudio]; see there for why it is safe to reuse. */
+    private var assistFrame: ByteArray? = null
 
     /** Asks HA for an HLS stream path for a camera (e.g. /api/hls/<token>/master.m3u8). */
     suspend fun requestCameraStreamPath(entityId: String): String? = withTimeoutOrNull(REQUEST_TIMEOUT_MS) {
@@ -127,8 +137,8 @@ class HaWebSocketClient {
                 return@suspendCancellableCoroutine
             }
             val id = msgId.incrementAndGet()
-            pendingResults[id] = { result ->
-                val path = (result as? JsonObject)?.get("url")?.jsonPrimitive?.contentOrNull
+            pendingResults[id] = { msg ->
+                val path = (msg?.get("result") as? JsonObject)?.get("url")?.jsonPrimitive?.contentOrNull
                 if (cont.isActive) cont.resume(path)
             }
             cont.invokeOnCancellation { pendingResults.remove(id) }
@@ -171,8 +181,9 @@ class HaWebSocketClient {
                 return@suspendCancellableCoroutine
             }
             val id = msgId.incrementAndGet()
-            pendingResults[id] = { result ->
-                val all = (result as? JsonArray)?.mapNotNull { Entity.fromStateJson(it.jsonObject) }.orEmpty()
+            pendingResults[id] = { msg ->
+                val all = (msg?.get("result") as? JsonArray)
+                    ?.mapNotNull { Entity.fromStateJson(it.jsonObject) }.orEmpty()
                 if (cont.isActive) cont.resume(all)
             }
             cont.invokeOnCancellation { pendingResults.remove(id) }
@@ -189,6 +200,19 @@ class HaWebSocketClient {
     private fun failPendingResults() {
         for (id in pendingResults.keys.toList()) {
             pendingResults.remove(id)?.invoke(null)
+        }
+        // An Assist run has no reply to resume; synthesise the error HA would have sent so the UI
+        // leaves "Listening" instead of waiting forever for events that can no longer arrive.
+        for (id in eventSubscriptions.keys.toList()) {
+            eventSubscriptions.remove(id)?.invoke(
+                buildJsonObject {
+                    put("type", "error")
+                    put("data", buildJsonObject {
+                        put("code", "connection-lost")
+                        put("message", "Lost the connection to Home Assistant.")
+                    })
+                },
+            )
         }
     }
 
@@ -295,6 +319,192 @@ class HaWebSocketClient {
             put("target", buildJsonObject { put("entity_id", entityId) })
         }
         ws.send(json.encodeToString(JsonObject.serializer(), payload))
+    }
+
+    /**
+     * Calls a service that returns a response (`return_response: true`) and waits for it — e.g.
+     * `conversation.process`, whose whole point is the sentence it answers with. Returns the raw
+     * `result` message so the caller can parse both the payload and HA's error text; null on
+     * timeout or a dropped socket.
+     *
+     * Unlike [callService] this targets by whatever [data] says (conversation agents are addressed
+     * with `agent_id`, not `target.entity_id`), so no target block is added.
+     */
+    suspend fun callServiceForResponse(
+        domain: String,
+        service: String,
+        data: Map<String, JsonElement>,
+        timeoutMs: Long = REQUEST_TIMEOUT_MS,
+    ): JsonObject? = withTimeoutOrNull(timeoutMs) {
+        suspendCancellableCoroutine { cont ->
+            val ws = currentSocket
+            if (ws == null) {
+                cont.resume(null)
+                return@suspendCancellableCoroutine
+            }
+            val id = msgId.incrementAndGet()
+            pendingResults[id] = { msg -> if (cont.isActive) cont.resume(msg) }
+            cont.invokeOnCancellation { pendingResults.remove(id) }
+            ws.send(
+                json.encodeToString(
+                    JsonObject.serializer(),
+                    buildJsonObject {
+                        put("id", id)
+                        put("type", "call_service")
+                        put("domain", domain)
+                        put("service", service)
+                        put("service_data", buildJsonObject { data.forEach { (k, v) -> put(k, v) } })
+                        put("return_response", true)
+                    },
+                ),
+            )
+        }
+    }
+
+    /**
+     * Starts a full Assist pipeline run over streamed audio: transcribe, answer, and synthesise the
+     * reply. Returns the command id — events for this run arrive tagged with it, and it is passed to
+     * [stopAssistPipeline] to unsubscribe — or null if the socket is down.
+     *
+     * Audio does not go through this JSON channel: HA answers with a `run-start` event carrying an
+     * `stt_binary_handler_id`, and the caller then streams PCM with [sendAssistAudio]. The transcript
+     * arrives as `stt-end`, the answer as `intent-end`, and the audio to play as `tts-end`.
+     */
+    /**
+     * Lists the Assist pipelines configured on this instance, for the settings picker. Null means
+     * the request failed or the socket dropped.
+     */
+    suspend fun fetchAssistPipelines(): AssistPipelines? = withTimeoutOrNull(REQUEST_TIMEOUT_MS) {
+        suspendCancellableCoroutine { cont ->
+            val ws = currentSocket
+            if (ws == null) {
+                cont.resume(null)
+                return@suspendCancellableCoroutine
+            }
+            val id = msgId.incrementAndGet()
+            pendingResults[id] = { msg ->
+                if (cont.isActive) cont.resume(AssistPipelines.fromResultMessage(msg))
+            }
+            cont.invokeOnCancellation { pendingResults.remove(id) }
+            ws.send(
+                json.encodeToString(
+                    JsonObject.serializer(),
+                    buildJsonObject {
+                        put("id", id)
+                        put("type", "assist_pipeline/pipeline/list")
+                    },
+                ),
+            )
+        }
+    }
+
+    fun startAssistPipeline(
+        /** Which pipeline to run; blank uses whichever HA treats as preferred. */
+        pipelineId: String,
+        /** Run through synthesis. False stops at the answer, for a pipeline with no voice. */
+        endAtTts: Boolean,
+        conversationId: String?,
+        /**
+         * Text to answer, which starts the run at `intent` and skips speech-to-text entirely.
+         * Null streams audio from `stt` instead — see [sendAssistAudio].
+         *
+         * This is how a TV whose microphone the app cannot open still gets the whole assistant: the
+         * TV's own recogniser produces the words, and the pipeline does everything after them. The
+         * alternative — `conversation.process` addressed at the pipeline's agent — threw away the
+         * pipeline's voice, its language and its "prefer handling commands locally" setting.
+         */
+        text: String? = null,
+        onEvent: (JsonObject) -> Unit,
+    ): Int? {
+        val ws = currentSocket ?: return null
+        val id = msgId.incrementAndGet()
+        eventSubscriptions[id] = onEvent
+        // A rejected run answers with a failed `result` and then nothing — no events ever follow.
+        // Without this the caller waits on a stream that is never coming, which is exactly what an
+        // instance with no speech-to-text configured does. Turn it into the error event the rest of
+        // the pipeline already knows how to report.
+        pendingResults[id] = { msg ->
+            val ok = msg?.get("success")?.jsonPrimitive?.contentOrNull?.toBoolean() ?: false
+            if (!ok) {
+                val reason = (msg?.get("error") as? JsonObject)
+                    ?.get("message")?.jsonPrimitive?.contentOrNull
+                eventSubscriptions[id]?.invoke(
+                    buildJsonObject {
+                        put("type", "error")
+                        put("data", buildJsonObject {
+                            put("code", "run-rejected")
+                            put("message", reason ?: "Home Assistant would not start the Assist pipeline.")
+                        })
+                    },
+                )
+            }
+        }
+        val payload = buildJsonObject {
+            put("id", id)
+            put("type", "assist_pipeline/run")
+            put("start_stage", if (text == null) "stt" else "intent")
+            // The whole chain, ending in synthesised audio. Home Assistant's voices (Piper, cloud,
+            // ElevenLabs) are far better than the TV's built-in engine, and its own agent answers —
+            // a run takes no agent override, which is precisely why the pipeline picker is the one
+            // that decides who replies.
+            //
+            // Stopping at "intent" is not a preference but a necessity: HA refuses a run that ends
+            // at tts when the pipeline has no voice, exactly as it refuses one with no ear. Asking
+            // for a stage the pipeline cannot serve would fail the whole exchange instead of merely
+            // leaving it unspoken.
+            put("end_stage", if (endAtTts) "tts" else "intent")
+            put(
+                "input",
+                if (text == null) {
+                    buildJsonObject { put("sample_rate", ASSIST_SAMPLE_RATE) }
+                } else {
+                    buildJsonObject { put("text", text) }
+                },
+            )
+            // Omitted rather than blank: HA falls back to the preferred pipeline only when the key
+            // is absent, and a pipeline that is not the preferred one is the usual place a working
+            // speech-to-text engine actually lives.
+            if (pipelineId.isNotBlank()) put("pipeline", pipelineId)
+            if (!conversationId.isNullOrBlank()) put("conversation_id", conversationId)
+            // No language override: each pipeline declares its own, and a TV with several
+            // assistants configured in different languages must not have one imposed on all of
+            // them by a single app-wide setting.
+        }
+        ws.send(json.encodeToString(JsonObject.serializer(), payload))
+        return id
+    }
+
+    /**
+     * Streams one chunk of 16-bit mono PCM to a running pipeline. HA's binary protocol is a raw
+     * WebSocket frame whose FIRST byte is the run's handler id and whose remainder is the audio.
+     */
+    fun sendAssistAudio(handlerId: Int, pcm: ByteArray, length: Int): Boolean {
+        val ws = currentSocket ?: return false
+        // Reused across chunks. A voice run delivers a chunk every ~30ms for as long as someone is
+        // talking, and AudioCapture already goes out of its way to reuse its own read buffer -
+        // allocating a fresh frame here threw that away and handed the collector the garbage
+        // instead. Only the capture thread calls this, and only one run exists at a time.
+        var frame = assistFrame
+        if (frame == null || frame.size < length + 1) {
+            frame = ByteArray(length + 1)
+            assistFrame = frame
+        }
+        frame[0] = handlerId.toByte()
+        System.arraycopy(pcm, 0, frame, 1, length)
+        // Copies once, into the immutable payload okhttp keeps - unavoidable, and the only copy left.
+        return ws.send(frame.toByteString(0, length + 1))
+    }
+
+    /** A frame carrying only the handler byte is how HA is told the utterance has ended. */
+    fun endAssistAudio(handlerId: Int): Boolean {
+        val ws = currentSocket ?: return false
+        return ws.send(byteArrayOf(handlerId.toByte()).toByteString())
+    }
+
+    /** Stops routing events for a finished (or abandoned) run. */
+    fun stopAssistPipeline(id: Int) {
+        eventSubscriptions.remove(id)
+        pendingResults.remove(id)
     }
 
     /** Convenience: toggle a toggleable entity using its domain's toggle service. */
@@ -422,7 +632,7 @@ class HaWebSocketClient {
                 val id = msg["id"]?.jsonPrimitive?.contentOrNull?.toIntOrNull()
                 val pending = if (id != null) pendingResults.remove(id) else null
                 when {
-                    pending != null -> pending(msg["result"])
+                    pending != null -> pending(msg)
                     id == getStatesId -> {
                         val arr = msg["result"] as? JsonArray ?: return
                         val tracked = trackedIds
@@ -444,6 +654,14 @@ class HaWebSocketClient {
             }
 
             "event" -> {
+                // An Assist run's events carry the id of the command that started it; everything
+                // else here is the state_changed subscription.
+                val eventId = msg["id"]?.jsonPrimitive?.contentOrNull?.toIntOrNull()
+                val subscriber = if (eventId != null) eventSubscriptions[eventId] else null
+                if (subscriber != null) {
+                    (msg["event"] as? JsonObject)?.let(subscriber)
+                    return
+                }
                 val data = msg["event"]?.jsonObject?.get("data")?.jsonObject ?: return
                 val entityId = data["entity_id"]?.jsonPrimitive?.contentOrNull ?: return
                 // Skip entities we don't track (cheap id check) — this is the perf win.
@@ -472,6 +690,11 @@ class HaWebSocketClient {
         private const val PUBLISH_THROTTLE_MS = 400L
         // Cap for one-shot requests (stream path / full fetch) so a silent HA never hangs the caller.
         private const val REQUEST_TIMEOUT_MS = 15_000L
+        // Conversation agents backed by an LLM routinely take far longer than a state fetch, so
+        // they get their own budget — 15 s timed out mid-thought on a cloud-backed agent.
+        const val CONVERSATION_TIMEOUT_MS = 45_000L
+        // HA's Assist pipelines expect 16 kHz mono PCM16; this is also what [AudioCapture] records.
+        const val ASSIST_SAMPLE_RATE = 16_000
 
         /** Normalises a base URL like `http://homeassistant.local:8123` to its WS endpoint. */
         fun toWebSocketUrl(baseUrl: String): String? {

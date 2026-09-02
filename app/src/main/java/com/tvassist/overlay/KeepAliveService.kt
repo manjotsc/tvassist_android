@@ -16,8 +16,11 @@ import android.view.WindowManager
 import android.widget.FrameLayout
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.ComposeView
+import androidx.compose.ui.unit.dp
 import androidx.lifecycle.setViewTreeLifecycleOwner
 import androidx.lifecycle.setViewTreeViewModelStoreOwner
 import androidx.savedstate.setViewTreeSavedStateRegistryOwner
@@ -31,6 +34,7 @@ import com.tvassist.data.settings.OverlayDisplay
 import com.tvassist.ui.FixedPillsOverlay
 import com.tvassist.ui.NotificationOverlay
 import com.tvassist.ui.OverlayDisplays
+import com.tvassist.ui.VoiceBar
 import com.tvassist.ui.overlayThemeOf
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -38,6 +42,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
@@ -58,15 +63,14 @@ class KeepAliveService : Service() {
     private lateinit var windowManager: WindowManager
     private var notifServer: NotificationServer? = null
     private var notifServerPort = 0
-    // Created on the first /speak (so devices that never use TTS don't init an engine).
-    private var tts: com.tvassist.data.notify.TtsManager? = null
-    private fun ttsEngine(): com.tvassist.data.notify.TtsManager =
-        tts ?: com.tvassist.data.notify.TtsManager(this).also { tts = it }
+    // Shared with the Assist card via the Application (still created on first use), so /speak and
+    // a spoken agent reply go through one engine and one audio-focus request.
+    private fun ttsEngine(): com.tvassist.data.notify.TtsManager = app.tts
 
     // Created on the first /play.
-    private var sound: com.tvassist.data.notify.SoundPlayer? = null
-    private fun soundPlayer(): com.tvassist.data.notify.SoundPlayer =
-        sound ?: com.tvassist.data.notify.SoundPlayer(this).also { sound = it }
+    // Shared with the Assist bar via the Application, so a notification sound and a spoken reply go
+    // through one player and one audio-focus request.
+    private fun soundPlayer(): com.tvassist.data.notify.SoundPlayer = app.sound
 
     /** Duck mode resolved from the per-call `duck` field falling back to this TV's default. */
     private fun resolveDuck(field: String?): String = when (field) {
@@ -122,6 +126,7 @@ class KeepAliveService : Service() {
     @Volatile private var announceSpeakRepeat = "once"
     @Volatile private var announceRepeatGap = 2
     @Volatile private var ttsWarmed = false
+    @Volatile private var playerWarmed = false
     private var notifView: View? = null
     private var notifOwner: OverlayLifecycleOwner? = null
 
@@ -169,6 +174,14 @@ class KeepAliveService : Service() {
                     ttsWarmed = true
                     runCatching { ttsEngine().warmUp() }
                 }
+                // And the audio player, for the same reason and a bigger number: building one
+                // enumerates the TV's codecs, measured at 2.6s on the UR3. Not gated on a setting —
+                // a chime, an Assist reply and a camera alert all arrive through it.
+                if (!playerWarmed) {
+                    playerWarmed = true
+                    runCatching { app.sound.warmUp() }
+                }
+
                 displayFlow.value = OverlayDisplay.from(it)
             }
         }
@@ -178,10 +191,36 @@ class KeepAliveService : Service() {
                 .distinctUntilChanged()
                 .collect { (notifEnabled, port, displayActive) ->
                     if (notifEnabled) ensureServer(port) else stopServer()
-                    // The overlay window hosts both pushed notifications and the dim/clock displays.
-                    if (notifEnabled || displayActive) ensureNotifWindow() else removeNotifWindow()
+                    // The overlay window hosts pushed notifications, the dim/clock displays and the
+                    // Assist voice bar; each keeps it alive independently.
+                    notifWindowWanted = notifEnabled || displayActive
+                    syncNotifWindow()
                 }
         }
+        scope.launch {
+            // collectLatest, so a follow-up question asked during the grace period cancels the
+            // pending teardown instead of pulling the window out from under the new exchange.
+            app.voice.ui.map { it != null }.distinctUntilChanged().collectLatest { active ->
+                if (active) {
+                    voiceWindowWanted = true
+                    syncNotifWindow()
+                } else {
+                    // Let the bar finish sliding out before the window drawing it goes away.
+                    delay(VOICE_EXIT_GRACE_MS)
+                    voiceWindowWanted = false
+                    syncNotifWindow()
+                }
+            }
+        }
+    }
+
+    // Why the notification window is up. Tracked separately because the two conditions change
+    // independently and either alone is reason enough to keep it.
+    private var notifWindowWanted = false
+    private var voiceWindowWanted = false
+
+    private fun syncNotifWindow() {
+        if (notifWindowWanted || voiceWindowWanted) ensureNotifWindow() else removeNotifWindow()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -282,9 +321,15 @@ class KeepAliveService : Service() {
                     }
                     val disp by displayFlow.collectAsState()
                     val pills by app.fixedStore.items.collectAsState()
+                    val voiceUi by app.voice.ui.collectAsState()
+                    val voiceLevel by app.voice.level.collectAsState()
+                    // Reported by the bar as it measures itself, so bottom-anchored pills clear it
+                    // by exactly its height rather than by a constant that would drift out of date.
+                    var voiceInset by remember { mutableStateOf(0.dp) }
                     OverlayDisplays(disp)
                     FixedPillsOverlay(pills, app.haRepository)
-                    NotificationOverlay(items, app.haRepository, theme)
+                    NotificationOverlay(items, app.haRepository, theme, bottomInset = voiceInset)
+                    VoiceBar(voiceUi, voiceLevel, theme) { voiceInset = it }
                     com.tvassist.ui.NotificationEnlarged(items, enlargedId, app.haRepository)
                 }
             }
@@ -349,8 +394,10 @@ class KeepAliveService : Service() {
     override fun onDestroy() {
         stopServer()
         removeNotifWindow()
-        tts?.shutdown()
-        sound?.shutdown()
+        // The TTS engine is app-scoped now and outlives this service, so it is deliberately not
+        // shut down here — doing so would silence the Assist card after the service restarts.
+        // The sound player is app-scoped now and outlives this service, so it is deliberately not
+        // shut down here — doing so would silence the Assist bar after the service restarts.
         scope.cancel()
         super.onDestroy()
     }
@@ -359,6 +406,8 @@ class KeepAliveService : Service() {
         private const val CHANNEL_ID = "tv_assist_keepalive"
         private const val NOTIFICATION_ID = 1002
         private const val TAG = "KeepAliveService"
+        // Long enough for the bar's exit animation (~180 ms) plus a frame or two of slack.
+        private const val VOICE_EXIT_GRACE_MS = 400L
 
         fun start(context: Context) {
             val intent = Intent(context, KeepAliveService::class.java)

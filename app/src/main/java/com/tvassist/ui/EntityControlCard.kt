@@ -132,7 +132,11 @@ private val SWATCHES = listOf(
  */
 @OptIn(ExperimentalTvMaterial3Api::class)
 @Composable
-fun EntityControlCard(entity: Entity, actions: EntityControlActions, onDismiss: () -> Unit) {
+fun EntityControlCard(
+    entity: Entity,
+    actions: EntityControlActions,
+    onDismiss: () -> Unit,
+) {
     val firstFocus = remember { FocusRequester() }
     LaunchedEffect(entity.entityId) { runCatching { firstFocus.requestFocus() } }
 
@@ -149,7 +153,8 @@ fun EntityControlCard(entity: Entity, actions: EntityControlActions, onDismiss: 
     ) {
         Column(
             modifier = Modifier
-                .widthIn(min = 360.dp, max = 440.dp)
+                // The Assist transcript needs more room to read than a stack of sliders does.
+                .widthIn(min = 360.dp, max = if (entity.isConversation) 560.dp else 440.dp)
                 .clip(RoundedCornerShape(18.dp))
                 .background(th.background)
                 .padding(16.dp),
@@ -183,6 +188,7 @@ fun EntityControlCard(entity: Entity, actions: EntityControlActions, onDismiss: 
                 "light" -> LightControls(entity, actions, firstFocus)
                 "climate" -> ClimateControls(entity, actions, firstFocus)
                 "fan" -> FanSpeedControls(entity, actions, firstFocus)
+                "conversation" -> ConversationControls(entity, actions, firstFocus)
                 else -> GenericControls(entity, actions, firstFocus)
             }
 
@@ -201,6 +207,8 @@ fun EntityControlCard(entity: Entity, actions: EntityControlActions, onDismiss: 
 
 private fun headerStatus(e: Entity): String = when {
     e.isButton -> ""
+    // A conversation entity's state is the timestamp it was last used — meaningless in a header.
+    e.isConversation -> "Assist"
     e.domain == "climate" -> e.currentTemperature?.let { "${cap(e.state)} · ${fmt(it)}°" } ?: cap(e.state)
     e.domain == "light" -> if (e.isOn) e.brightnessPct?.let { "on · $it%" } ?: "on" else "off"
     e.domain == "fan" -> if (e.isOn) e.percentage?.let { "on · $it%" } ?: "on" else "off"

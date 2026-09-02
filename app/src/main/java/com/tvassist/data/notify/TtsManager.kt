@@ -39,6 +39,9 @@ class TtsManager(context: Context) {
     @Volatile private var repeatParams: Bundle = Bundle()
     // Utterance id of the final segment in a sequence; only its completion advances/repeats.
     @Volatile private var finalUid: String = ""
+    // Run once when the current sequence finishes of its own accord. Lets a caller follow the
+    // speech rather than guess at its duration — the Assist bar dismisses itself on it.
+    @Volatile private var onFinished: (() -> Unit)? = null
     // Pause between repeats of the current sequence (set per speak() call).
     @Volatile private var repeatGapMs = DEFAULT_REPEAT_GAP_MS
 
@@ -75,6 +78,10 @@ class TtsManager(context: Context) {
      * [volume] is 0–100; [duckMode] controls how current TV audio reacts ("off" = play over,
      * "duck" = OS lowers it, "pause" = pause it). When [repeat] is true the whole sequence repeats
      * (with a short gap) until [stop] or a newer speak. Returns a token to pass to [stop].
+     *
+     * [onFinished] runs on the TTS callback thread when the sequence ends of its own accord. It does
+     * NOT run when speech is cut short — by [stop], by a newer speak, or because [repeat] means it
+     * never ends — so a caller waiting on it wants a timeout of its own as well.
      */
     fun speak(
         utterances: List<String>,
@@ -84,6 +91,7 @@ class TtsManager(context: Context) {
         interrupt: Boolean = true,
         repeat: Boolean = false,
         repeatGapMs: Long = DEFAULT_REPEAT_GAP_MS,
+        onFinished: (() -> Unit)? = null,
     ): Long {
         val texts = utterances.map { it.trim() }.filter { it.isNotBlank() }
         if (texts.isEmpty()) return 0L
@@ -104,6 +112,7 @@ class TtsManager(context: Context) {
             this.repeatParams = params
             this.repeatGapMs = repeatGapMs.coerceAtLeast(0L)
             this.finalUid = "tvassist-final-$t"
+            this.onFinished = onFinished
             speakSequence(texts, params, flushFirst = interrupt)
         }
         if (ready) action() else pending.add(action)
@@ -131,6 +140,8 @@ class TtsManager(context: Context) {
             main.postDelayed({ speakSequence(texts, repeatParams, flushFirst = true) }, repeatGapMs)
         } else {
             abandonFocus()
+            // Taken before invoking: a callback that starts new speech must not be re-run by it.
+            onFinished.also { onFinished = null }?.invoke()
         }
     }
 
@@ -139,6 +150,7 @@ class TtsManager(context: Context) {
         if (t != token) return
         repeat = false
         repeatTexts = emptyList()
+        onFinished = null // stopped speech never "finished"; the caller cut it short deliberately
         main.removeCallbacksAndMessages(null)
         runCatching { tts.stop() }
         abandonFocus()

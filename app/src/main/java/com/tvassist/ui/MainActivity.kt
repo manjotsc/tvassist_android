@@ -151,12 +151,11 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        // Start the background service if keep-alive or notifications need it.
+        // Start the background service if anything still needs it — see [Settings.needsKeepAlive],
+        // which BootReceiver applies to the same decision at boot.
         lifecycleScope.launch {
             val s = (application as TvAssistApp).settingsStore.settings.first()
-            if (s.keepAlive || s.notificationsEnabled || s.dimLevel > 0 || s.clockEnabled) {
-                com.tvassist.overlay.KeepAliveService.start(this@MainActivity)
-            }
+            if (s.needsKeepAlive) com.tvassist.overlay.KeepAliveService.start(this@MainActivity)
         }
         // Debug-only test hook: `adb shell am start ... --es ha_url <url> --es ha_token <tok>`
         // and optionally `--es action open_sidebar` to pop the overlay.
@@ -233,6 +232,13 @@ class MainActivity : ComponentActivity() {
                 "backup" -> viewModel.backupSettings(com.tvassist.data.settings.BackupLocation.APP)
                 "restore" -> viewModel.restoreSettings(com.tvassist.data.settings.BackupLocation.APP)
                 "trigger" -> viewModel.setTriggerKey(KeyEvent.KEYCODE_GUIDE)
+                // The mic key reaches the app through the accessibility service, which injected
+                // key events never do — so `adb input keyevent` cannot open the voice bar and this
+                // is the only way to look at it from a script.
+                "voice" -> window.decorView.postDelayed(
+                    { (application as TvAssistApp).voice.start() },
+                    2_000,
+                )
             }
         }
 
@@ -241,6 +247,8 @@ class MainActivity : ComponentActivity() {
                 "settings" -> Route.SettingsHub
                 "import" -> Route.Import
                 "layout" -> Route.Overlay
+                "triggers" -> Route.Triggers
+                "appearance" -> Route.Appearance
                 else -> Route.Home
             }
         } else {
@@ -295,6 +303,10 @@ private fun AppScreen(
     val setupPin by viewModel.setupPin.collectAsStateWithLifecycle()
     val connected = connection is ConnectionState.Connected
 
+    // Talk presses go to the app-scoped voice controller, which raises the bar in the notification
+    // overlay window — no card, and nothing for this screen to hold on to.
+    val voice = (LocalContext.current.applicationContext as TvAssistApp).voice
+
     var route by remember { mutableStateOf(initialRoute) }
     var openEntityId by remember { mutableStateOf(initialCardId) }
     // When set, a fullscreen live camera stream is shown for this entity id.
@@ -338,6 +350,7 @@ private fun AppScreen(
                         onImport = { route = Route.Import },
                         onCustomize = { route = Route.Customize },
                         onOpenCard = { openEntityId = it },
+                        onOpenAssist = { voice.start() },
                         onOpenCamera = { cameraStreamId = it },
                         onOpenPerson = { personMapId = it },
                         onOpenMapCard = { mapCardId = it },
@@ -366,11 +379,24 @@ private fun AppScreen(
         val openEntity = openEntityId?.let { id -> entities.firstOrNull { it.entityId == id } }
         if (openEntity != null) {
             BackHandler { openEntityId = null }
-            EntityControlCard(
-                entity = openEntity,
-                actions = viewModel.controlActions,
-                onDismiss = { openEntityId = null },
-            )
+            // The control card and everything it embeds (tiles, sliders, the Assist input) read
+            // their colors from LocalOverlayTheme. Without this provider they fall back to
+            // DefaultOverlayTheme's hardcoded palette, so the card ignored the user's appearance
+            // settings in-app while honouring them in the overlay — the same card, two looks.
+            val cardTheme = remember(settings) {
+                overlayThemeOf(
+                    settings.overlayBgColor, settings.overlayTileColor, settings.overlayAccentColor,
+                    settings.overlayBorderColor, settings.overlayBorderEnabled,
+                    settings.overlayIconOnColor, settings.overlayIconOffColor, settings.overlayFocusColor,
+                )
+            }
+            CompositionLocalProvider(LocalOverlayTheme provides cardTheme) {
+                EntityControlCard(
+                    entity = openEntity,
+                    actions = viewModel.controlActions,
+                    onDismiss = { openEntityId = null },
+                )
+            }
         }
 
         val cameraEntity = cameraStreamId?.let { id -> entities.firstOrNull { it.entityId == id } }
@@ -541,6 +567,8 @@ private fun HomeContent(
     onImport: () -> Unit,
     onCustomize: () -> Unit,
     onOpenCard: (String) -> Unit,
+    /** Starts a spoken exchange with a conversation agent (the Talk press action). */
+    onOpenAssist: (String) -> Unit,
     onOpenCamera: (String) -> Unit,
     onOpenPerson: (String) -> Unit,
     onOpenMapCard: (String) -> Unit,
@@ -597,7 +625,11 @@ private fun HomeContent(
                             e.isMapCard -> onOpenMapCard(e.entityId)
                             e.domain == "camera" -> onOpenCamera(e.entityId)
                             e.isPerson -> onOpenPerson(e.entityId)
-                            else -> performPress(overrides[e.entityId]?.singlePress ?: "default", e, actions, { onOpenCard(it.entityId) }, single = true)
+                            else -> performPress(
+                                overrides[e.entityId]?.singlePress ?: "default", e, actions,
+                                { onOpenCard(it.entityId) }, single = true,
+                                openVoice = { onOpenAssist(it.entityId) },
+                            )
                         }
                     },
                     onMore = { e ->
@@ -605,7 +637,11 @@ private fun HomeContent(
                             e.isMapCard -> onOpenMapCard(e.entityId)
                             e.domain == "camera" -> onOpenCamera(e.entityId)
                             e.isPerson -> onOpenPerson(e.entityId)
-                            else -> performPress(overrides[e.entityId]?.longPress ?: "default", e, actions, { onOpenCard(it.entityId) }, single = false)
+                            else -> performPress(
+                                overrides[e.entityId]?.longPress ?: "default", e, actions,
+                                { onOpenCard(it.entityId) }, single = false,
+                                openVoice = { onOpenAssist(it.entityId) },
+                            )
                         }
                     },
                 )
@@ -617,7 +653,7 @@ private fun HomeContent(
 // Preferred ordering of entity categories (domains); others follow alphabetically.
 private val CATEGORY_ORDER = listOf(
     "climate", "light", "switch", "fan", "cover", "lock", "media_player", "camera",
-    "vacuum", "scene", "script", "automation", "input_boolean", "input_button",
+    "vacuum", "scene", "script", "automation", "conversation", "input_boolean", "input_button",
     "button", "binary_sensor", "sensor",
 )
 
@@ -676,14 +712,21 @@ private fun PermissionsRow() {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
 
-    // Re-check both permissions whenever we resume (e.g. returning from system settings).
+    // Re-check the permissions whenever we resume (e.g. returning from system settings).
     var hasOverlay by remember { mutableStateOf(Settings.canDrawOverlays(context)) }
     var hasKeyCapture by remember { mutableStateOf(isKeyCaptureEnabled(context)) }
+    var hasMic by remember { mutableStateOf(com.tvassist.data.assist.hasRecordPermission(context)) }
+    // RECORD_AUDIO is a runtime grant, and a Service (the overlay) cannot ask for one — so the
+    // request lives here, in the Activity, and the Assist card points the user at this screen.
+    val micLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.RequestPermission(),
+    ) { granted -> hasMic = granted }
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
                 hasOverlay = Settings.canDrawOverlays(context)
                 hasKeyCapture = isKeyCaptureEnabled(context)
+                hasMic = com.tvassist.data.assist.hasRecordPermission(context)
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
@@ -701,6 +744,11 @@ private fun PermissionsRow() {
                 label = if (hasKeyCapture) "✓ Key capture on" else "Enable key capture",
                 selected = hasKeyCapture,
                 onClick = { openAccessibilitySettings(context) },
+            )
+            ChipButton(
+                label = if (hasMic) "✓ Microphone allowed" else "Allow microphone",
+                selected = hasMic,
+                onClick = { micLauncher.launch(android.Manifest.permission.RECORD_AUDIO) },
             )
             AccentButton("Open sidebar", {
                 if (hasOverlay) {
@@ -742,9 +790,10 @@ private fun openAccessibilitySettings(context: android.content.Context) {
 
 /**
  * A prominent banner surfacing conditions that silently break the app so the user notices without
- * digging into settings — chiefly the two that Android can revoke on its own: the overlay
- * permission, and the key-capture accessibility service (disabled on every app update). Re-checked
- * on resume; renders nothing when everything's healthy.
+ * digging into settings — the overlay permission and the key-capture accessibility service, both
+ * of which Android can revoke on its own (key capture is disabled on every app update), plus the
+ * microphone grant, which is simply never given until someone asks for it. Re-checked on resume;
+ * renders nothing when everything's healthy.
  */
 @OptIn(ExperimentalTvMaterial3Api::class)
 @Composable
@@ -753,17 +802,33 @@ private fun HealthWarnings() {
     val lifecycleOwner = LocalLifecycleOwner.current
     var hasOverlay by remember { mutableStateOf(Settings.canDrawOverlays(context)) }
     var hasKeyCapture by remember { mutableStateOf(isKeyCaptureEnabled(context)) }
+    // NEEDS_PERMISSION, not a bare permission check: it is returned only when this device HAS a
+    // way to listen and the grant is what is missing. On hardware with no app-openable mic and no
+    // recogniser there is nothing a grant would fix, and a warning there would be permanent noise.
+    var micNeeded by remember {
+        mutableStateOf(
+            com.tvassist.data.assist.voiceBackendFor(context) ==
+                com.tvassist.data.assist.VoiceBackend.NEEDS_PERMISSION,
+        )
+    }
+    // A runtime grant cannot be requested from a Service, and unlike the other two this one is
+    // asked for in-app rather than by sending the user to a settings screen.
+    val micLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.RequestPermission(),
+    ) { granted -> micNeeded = !granted }
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
                 hasOverlay = Settings.canDrawOverlays(context)
                 hasKeyCapture = isKeyCaptureEnabled(context)
+                micNeeded = com.tvassist.data.assist.voiceBackendFor(context) ==
+                    com.tvassist.data.assist.VoiceBackend.NEEDS_PERMISSION
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
-    if (hasOverlay && hasKeyCapture) return
+    if (hasOverlay && hasKeyCapture && !micNeeded) return
 
     Column(
         modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp))
@@ -788,6 +853,12 @@ private fun HealthWarnings() {
                 "Key capture is off",
                 "Your trigger button won't open the overlay. Android turns this off after each app update.",
             ) { openAccessibilitySettings(context) }
+        }
+        if (micNeeded) {
+            WarningLine(
+                "Microphone access is off",
+                "The voice key can't listen. The sidebar and notifications still work.",
+            ) { micLauncher.launch(android.Manifest.permission.RECORD_AUDIO) }
         }
     }
     Spacer(Modifier.height(16.dp))
@@ -1205,6 +1276,8 @@ private fun ControlRow(
 /** Short right-aligned status for a Home row (brightness/temp when relevant). */
 private fun controlRowValue(entity: Entity): String = when {
     entity.isButton -> ""
+    // Its state is the ISO timestamp it was last used; showing that raw is noise.
+    entity.isConversation -> "Assist"
     entity.domain == "light" -> if (entity.isOn) entity.brightnessPct?.let { "$it%" } ?: "on" else "off"
     entity.domain == "climate" -> entity.currentTemperature?.let { "${fmt(it)}°" } ?: entity.state
     entity.isLock -> cap(entity.state) // Locked / Unlocked / Jammed / …
@@ -1459,7 +1532,7 @@ private fun EntityEditorScreen(
             modifier = Modifier.horizontalScroll(rememberScrollState()),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            PressAction.ALL.forEach { a ->
+            PressAction.forEntityId(entity.entityId).forEach { a ->
                 ChipButton(PressAction.label(a), draft.singlePress == a, onClick = { update(draft.copy(singlePress = a)) })
             }
         }
@@ -1471,7 +1544,7 @@ private fun EntityEditorScreen(
             modifier = Modifier.horizontalScroll(rememberScrollState()),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            PressAction.ALL.forEach { a ->
+            PressAction.forEntityId(entity.entityId).forEach { a ->
                 ChipButton(PressAction.label(a), draft.longPress == a, onClick = { update(draft.copy(longPress = a)) })
             }
         }
@@ -2327,11 +2400,111 @@ private fun PermissionsPage(viewModel: ConnectionViewModel, onBack: () -> Unit) 
                 onClick = {
                     val next = !settings.keepAlive
                     viewModel.setKeepAlive(next)
-                    if (next) com.tvassist.overlay.KeepAliveService.start(context)
-                    else com.tvassist.overlay.KeepAliveService.stop(context)
+                    // Asks the settings this toggle is about to produce, not this one switch: the
+                    // notification server, the dim/clock overlays and the voice bar all live in the
+                    // same service, and turning keep-alive off used to take every one of them down.
+                    if (settings.copy(keepAlive = next).needsKeepAlive) {
+                        com.tvassist.overlay.KeepAliveService.start(context)
+                    } else {
+                        com.tvassist.overlay.KeepAliveService.stop(context)
+                    }
                 },
             )
         }
+    }
+}
+
+/**
+ * Chooses which Assist pipeline transcribes speech, and says plainly when the chosen one cannot.
+ *
+ * The warning is the point. A pipeline with no speech-to-text engine rejects every run, and until
+ * this screen said so the only symptom was Speak failing with Home Assistant's own terse "the
+ * pipeline does not support speech-to-text" — after the mic had already appeared to open.
+ */
+@OptIn(ExperimentalTvMaterial3Api::class)
+@Composable
+private fun AssistPipelinePicker(
+    pipelines: com.tvassist.data.ha.AssistPipelines?,
+    loading: Boolean,
+    selected: String,
+    /**
+     * True when the TV's own recogniser transcribes, so the pipeline's speech-to-text is not in the
+     * path at all. Both BRAVIAs are this case — the remote's mic is never a recordable input — and
+     * calling a working setup broken because the pipeline has no `stt_engine` sent the owner of one
+     * to fix a stage that was never going to run.
+     */
+    transcribedOnDevice: Boolean,
+    onSelect: (String) -> Unit,
+    onRetry: () -> Unit,
+) {
+    if (pipelines == null) {
+        if (loading) {
+            Text("Loading pipelines…", color = Color(0xFF999999), fontSize = 13.sp)
+        } else {
+            Text(
+                "Could not read the pipeline list from Home Assistant.",
+                color = Color(0xFFFFB74D), fontSize = 13.sp,
+            )
+            Spacer(Modifier.height(8.dp))
+            ChipButton("Retry", selected = false, onClick = onRetry)
+        }
+        return
+    }
+    if (pipelines.pipelines.isEmpty()) {
+        Text(
+            "Home Assistant reports no Assist pipelines. Add one under Settings → Voice assistants.",
+            color = Color(0xFFFFB74D), fontSize = 13.sp,
+        )
+        return
+    }
+
+    OptionChips(
+        options = listOf("" to "Auto (preferred)") +
+            pipelines.pipelines.map { p ->
+                val flaw = when {
+                    !p.supportsSpeech && !transcribedOnDevice -> " · no speech-to-text"
+                    !p.supportsVoice -> " · no voice"
+                    else -> ""
+                }
+                p.id to p.name + flaw
+            },
+        selected = selected,
+        onSelect = onSelect,
+    )
+
+    Spacer(Modifier.height(8.dp))
+    // Reports the pipeline that will actually run, not the chip that is lit: on Auto those differ,
+    // and it is the effective one whose engines decide what works.
+    val effective = pipelines.resolve(selected) ?: return
+    when {
+        // Fatal: without speech-to-text the run is rejected outright and nothing happens at all.
+        // Unless this TV never asks it to transcribe, in which case the missing engine is moot.
+        !effective.supportsSpeech && !transcribedOnDevice -> Text(
+            "${effective.name} has no speech-to-text engine, so Speak will fail on it. Pick a " +
+                "pipeline that has one, or add an engine in Home Assistant under " +
+                "Settings → Voice assistants.",
+            color = Color(0xFFFFB74D), fontSize = 12.sp,
+        )
+        // Survivable: you still get an answer, just written rather than spoken.
+        !effective.supportsVoice -> Text(
+            "${effective.name} has no text-to-speech engine, so replies will appear on screen but " +
+                "will not be read aloud. Add a voice in Home Assistant under Settings → " +
+                "Voice assistants.",
+            color = Color(0xFFFFB74D), fontSize = 12.sp,
+        )
+        // Names the stages that actually run: on the recogniser route the TV hears, and only the
+        // agent and the voice come from the pipeline.
+        transcribedOnDevice -> Text(
+            "Using ${effective.name} — this TV's own recogniser hears you, " +
+                "${effective.conversationEngine ?: "its default agent"} answers, and it speaks " +
+                "with ${effective.ttsEngine}.",
+            color = Color(0xFF8AB4F8), fontSize = 12.sp,
+        )
+        else -> Text(
+            "Using ${effective.name} — hears with ${effective.sttEngine}, answers with " +
+                "${effective.conversationEngine ?: "its default agent"}, speaks with ${effective.ttsEngine}.",
+            color = Color(0xFF8AB4F8), fontSize = 12.sp,
+        )
     }
 }
 
@@ -2339,6 +2512,12 @@ private fun PermissionsPage(viewModel: ConnectionViewModel, onBack: () -> Unit) 
 @Composable
 private fun TriggersPage(viewModel: ConnectionViewModel, onBack: () -> Unit) {
     val settings by viewModel.settings.collectAsStateWithLifecycle()
+    val micContext = LocalContext.current
+    // Re-enumerated per visit: a USB mic can be plugged in between openings of this page.
+    val micChoices = remember { com.tvassist.data.assist.listMicChoices(micContext) }
+    val pipelines by viewModel.assistPipelines.collectAsStateWithLifecycle()
+    val pipelinesLoading by viewModel.assistPipelinesLoading.collectAsStateWithLifecycle()
+    LaunchedEffect(Unit) { viewModel.loadAssistPipelines() }
     PageScaffold("Triggers & keys", onBack) {
         Text(
             "The remote button that opens the Home Assistant control overlay from any app.",
@@ -2348,6 +2527,86 @@ private fun TriggersPage(viewModel: ConnectionViewModel, onBack: () -> Unit) {
         Text("Current: ${keyName(settings.triggerKeyCode)}", color = Color(0xFF8AB4F8), fontSize = 16.sp)
         Spacer(Modifier.height(12.dp))
         TriggerKeyCapture(onCaptured = viewModel::setTriggerKey)
+
+        Spacer(Modifier.height(26.dp))
+        Text("Assist microphone", fontSize = 18.sp, color = Color.White)
+        Spacer(Modifier.height(6.dp))
+        Text(
+            "A second button that opens Assist with the microphone already listening, so you can " +
+                "just talk. Audio is streamed to Home Assistant, which transcribes it, answers, and " +
+                "speaks the reply back. Needs microphone access (Settings → Permissions).",
+            color = Color(0xFF999999), fontSize = 13.sp,
+        )
+        Spacer(Modifier.height(10.dp))
+        Text(
+            text = if (settings.micKeyCode == 0) "Current: not set" else "Current: ${keyName(settings.micKeyCode)}",
+            color = Color(0xFF8AB4F8), fontSize = 16.sp,
+        )
+        Spacer(Modifier.height(12.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            // The voice bar is drawn by the keep-alive service — make sure it's running, the same
+            // way the dim/clock toggles do on the On-screen display page.
+            TriggerKeyCapture(
+                onCaptured = { code ->
+                    com.tvassist.overlay.KeepAliveService.start(micContext)
+                    viewModel.setMicKeyCode(code)
+                },
+                label = "Set mic key",
+            )
+            if (settings.micKeyCode != 0) {
+                ChipButton("Clear", selected = false, onClick = { viewModel.setMicKeyCode(0) })
+            }
+        }
+
+        Spacer(Modifier.height(22.dp))
+        Text("Assist pipeline", fontSize = 16.sp, color = Color.White)
+        Spacer(Modifier.height(6.dp))
+        Text(
+            "The pipeline runs the whole exchange: it transcribes what you say, answers with its " +
+                "own conversation agent, and speaks the reply back in its own voice. That is why " +
+                "there is no separate agent setting — a run is addressed by pipeline and takes no " +
+                "agent override. Auto uses whichever pipeline Home Assistant prefers.",
+            color = Color(0xFF999999), fontSize = 13.sp,
+        )
+        Spacer(Modifier.height(10.dp))
+        AssistPipelinePicker(
+            pipelines = pipelines,
+            loading = pipelinesLoading,
+            selected = settings.assistPipelineId,
+            transcribedOnDevice = com.tvassist.data.assist.voiceRouteFor(
+                micContext,
+                settings.assistMicId,
+            ) == com.tvassist.data.assist.VoiceBackend.DEVICE_RECOGNIZER,
+            onSelect = viewModel::setAssistPipelineId,
+            onRetry = viewModel::loadAssistPipelines,
+        )
+
+        Spacer(Modifier.height(22.dp))
+        Text("Microphone", fontSize = 16.sp, color = Color.White)
+        Spacer(Modifier.height(6.dp))
+        Text(
+            "Which microphone Assist listens with. A USB or built-in mic streams audio to Home " +
+                "Assistant, which runs the whole pipeline and speaks the reply in its own voice. " +
+                "\"TV remote\" goes through the TV's own recogniser — the only way to reach the " +
+                "remote's mic — so the TV transcribes, but the pipeline's agent still answers and " +
+                "the reply is still read back in the pipeline's voice. Auto prefers a real mic " +
+                "when one exists.",
+            color = Color(0xFF999999), fontSize = 13.sp,
+        )
+        Spacer(Modifier.height(10.dp))
+        OptionChips(
+            options = micChoices.map { it.key to it.label },
+            selected = settings.assistMicId,
+            onSelect = viewModel::setAssistMicId,
+        )
+        val micChoice = settings.assistMicId
+        if (micChoice.isNotBlank() && micChoices.none { it.key == micChoice }) {
+            Spacer(Modifier.height(8.dp))
+            Text(
+                "The chosen microphone is not connected — Assist will fall back to Auto.",
+                color = Color(0xFFFFB74D), fontSize = 12.sp,
+            )
+        }
     }
 }
 
@@ -3267,8 +3526,11 @@ private fun NotificationsPage(viewModel: ConnectionViewModel, onBack: () -> Unit
                 onClick = {
                     val next = !settings.notificationsEnabled
                     viewModel.setNotificationsEnabled(next)
-                    if (next || settings.keepAlive) com.tvassist.overlay.KeepAliveService.start(context)
-                    else com.tvassist.overlay.KeepAliveService.stop(context)
+                    if (settings.copy(notificationsEnabled = next).needsKeepAlive) {
+                        com.tvassist.overlay.KeepAliveService.start(context)
+                    } else {
+                        com.tvassist.overlay.KeepAliveService.stop(context)
+                    }
                 },
             )
         }
@@ -3898,7 +4160,7 @@ private fun ReleaseTag(prerelease: Boolean) {
 
 @OptIn(ExperimentalTvMaterial3Api::class)
 @Composable
-private fun TriggerKeyCapture(onCaptured: (Int) -> Unit) {
+private fun TriggerKeyCapture(onCaptured: (Int) -> Unit, label: String = "Set trigger key") {
     var capturing by remember { mutableStateOf(false) }
     var lastCaptured by remember { mutableStateOf<Int?>(null) }
     val focus = remember { FocusRequester() }
@@ -3907,7 +4169,7 @@ private fun TriggerKeyCapture(onCaptured: (Int) -> Unit) {
 
     Column {
         AccentButton(
-            label = if (capturing) "Press a remote button…  (Back to cancel)" else "Set trigger key",
+            label = if (capturing) "Press a remote button…  (Back to cancel)" else label,
             onClick = { capturing = true },
             leadingIcon = Icons.Rounded.SettingsRemote,
             modifier = Modifier

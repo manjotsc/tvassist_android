@@ -4,6 +4,7 @@ import com.tvassist.data.web.HttpRequest
 import com.tvassist.data.web.HttpResponse
 import com.tvassist.data.web.TinyHttpServer
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
@@ -42,6 +43,12 @@ class NotificationServer(
         // Constant-time compare so a matching prefix can't be found by timing the response.
         val authorized = required.isEmpty() ||
             java.security.MessageDigest.isEqual(provided.toByteArray(), required.toByteArray())
+        if (!authorized) {
+            // The commonest wiring mistake, and until now completely silent: an HA automation
+            // posting with the wrong token got a 401 nobody ever saw. Warned, not logged at
+            // info, so "Problems only" surfaces it. The offered token is never logged.
+            android.util.Log.w(TAG, "rejected ${req.method} ${req.path}: token did not match")
+        }
         if (!authorized) return json("""{"ok":false,"error":"unauthorized"}""", 401)
 
         fun fields() = if (req.method == "POST") jsonToFields(req.body) + req.query else req.query
@@ -50,6 +57,23 @@ class NotificationServer(
                 val f = if (req.method == "POST") jsonToFields(req.body) else req.query
                 val notif = fieldsToNotification(f)
                 if (notif != null) {
+                    // id/duration/media only. The title and message are somebody's doorbell
+                    // caption and have no place in a file that gets sent to whoever is helping.
+                    //
+                    // Says so explicitly when the id was made up here. A bare `id=<17 digits>` was
+                    // indistinguishable from an id the automation had chosen, so the one thing the
+                    // line needed to tell you — that the service call sent no id, and this
+                    // notification therefore cannot be replaced or cleared by name — was the one
+                    // thing it didn't.
+                    android.util.Log.i(
+                        TAG,
+                        if (f["id"].isNullOrBlank()) {
+                            "notify accepted id=${notif.id} (generated: the call sent no id) " +
+                                "duration=${notif.durationSec}s"
+                        } else {
+                            "notify accepted id=${notif.id} duration=${notif.durationSec}s"
+                        },
+                    )
                     store.show(notif)
                     // Lifecycle context so looping sound / repeating speech can stop when this exact
                     // notification instance leaves the screen (see KeepAliveService).
@@ -63,6 +87,7 @@ class NotificationServer(
                     if (isTruthy(f["speak"])) speakNotification(notif, f + ctx)
                     json("""{"ok":true,"id":"${notif.id}"}""")
                 } else {
+                    android.util.Log.w(TAG, "notify rejected: payload had no message, title, icon or media")
                     json("""{"ok":false,"error":"empty notification (needs a message, title, icon or media)"}""", 400)
                 }
             }
@@ -165,7 +190,9 @@ class NotificationServer(
         ).any { it.isNotBlank() }
         if (!hasContent) return null
         return TvNotification(
-            id = f["id"]?.takeIf { it.isNotBlank() } ?: System.nanoTime().toString(),
+            // Prefixed, so a generated id is recognisable as one on sight — in the log, in the
+            // status page, and in the `{"ok":true,"id":…}` reply an automation might store.
+            id = f["id"]?.takeIf { it.isNotBlank() } ?: "auto-${System.nanoTime()}",
             message = message,
             title = f["title"].orEmpty(),
             source = f["source"].orEmpty(),
@@ -234,9 +261,27 @@ class NotificationServer(
 
     private fun isTruthy(v: String?): Boolean = v?.trim()?.lowercase() in setOf("1", "true", "yes", "on")
 
-    private fun jsonToFields(body: String): Map<String, String> {
+    /**
+     * Flattens a posted JSON body into the flat scalar field map the handlers read.
+     *
+     * One level of nesting is flattened as well, because Home Assistant's own `notify` platform
+     * puts everything except `message` and `title` inside a `data:` block. A payload shaped
+     * `{"message":…,"data":{"id":"doorbell","duration":20}}` used to arrive with its id, duration,
+     * image and colours silently dropped: the notification still showed, so nothing looked broken,
+     * but under a *generated* id — which is why a repeat ring stacked a second card instead of
+     * replacing the first, and why the log read `id=<17 digits>`.
+     *
+     * Outer keys win, so a top-level field is never overwritten by one of the same name nested
+     * inside. Nothing this server accepts is legitimately an object, so there is nothing to lose.
+     */
+    internal fun jsonToFields(body: String): Map<String, String> {
         val obj = runCatching { json.parseToJsonElement(body).jsonObject }.getOrNull() ?: return emptyMap()
-        return obj.mapNotNull { (k, v) -> (v as? JsonPrimitive)?.contentOrNull?.let { k to it } }.toMap()
+        val nested = obj.values.filterIsInstance<JsonObject>().flatMap { it.entries }
+        val flat = LinkedHashMap<String, String>()
+        for ((k, v) in nested + obj.entries) {
+            (v as? JsonPrimitive)?.contentOrNull?.let { flat[k] = it }
+        }
+        return flat
     }
 
     private fun statusHtml(): String = """
@@ -251,6 +296,9 @@ class NotificationServer(
     """.trimIndent()
 
     companion object {
+        /** Matches the name handed to TinyHttpServer, so both log under one tag. */
+        const val TAG = "NotifyServer"
+
         const val DEFAULT_PORT = 8455
 
         /** Best-effort LAN IPv4 for display in the UI. */

@@ -56,7 +56,23 @@ object PressAction {
     const val RUN = "run"           // activate (scene/script/turn_on)
     const val NONE = "none"
 
+    // Conversation agents only: a card you type into and a card that opens listening are two
+    // genuinely different actions, and which one a press should do is a matter of taste.
+    const val ASSIST_TALK = "assist_talk"
+    const val ASSIST_TYPE = "assist_type"
+
     val ALL = listOf(DEFAULT, TOGGLE, MORE, TURN_ON, TURN_OFF, RUN, NONE)
+
+    /**
+     * The actions worth offering for [entityId]'s domain. A conversation agent cannot be toggled or
+     * turned on, so those chips are noise there; everything else keeps the full list.
+     */
+    fun forEntityId(entityId: String): List<String> =
+        if (entityId.startsWith("conversation.")) {
+            listOf(DEFAULT, ASSIST_TALK, ASSIST_TYPE, NONE)
+        } else {
+            ALL
+        }
 
     fun label(action: String): String = when (action) {
         DEFAULT -> "Default"
@@ -66,6 +82,8 @@ object PressAction {
         TURN_OFF -> "Turn off"
         RUN -> "Run"
         NONE -> "Nothing"
+        ASSIST_TALK -> "Talk (mic)"
+        ASSIST_TYPE -> "Type"
         else -> action
     }
 }

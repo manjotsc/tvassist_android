@@ -168,6 +168,9 @@ fun performPress(
     actions: EntityControlActions,
     openCard: (Entity) -> Unit,
     single: Boolean,
+    /** Opens a conversation agent's card with the mic already live. Defaults to a plain open, so a
+     *  caller with no voice route degrades to the typing card rather than doing nothing. */
+    openVoice: (Entity) -> Unit = openCard,
 ) {
     when (action) {
         PressAction.DEFAULT ->
@@ -177,6 +180,10 @@ fun performPress(
                     entity.isToggleable -> actions.toggle(entity)
                     else -> openCard(entity)
                 }
+            } else if (entity.isConversation) {
+                // Hold on an agent goes straight to the mic: it is the fastest way to talk without
+                // moving your hand, and the plain card is still one short press away.
+                openVoice(entity)
             } else {
                 openCard(entity)
             }
@@ -185,6 +192,8 @@ fun performPress(
         PressAction.TURN_ON -> actions.turnOn(entity)
         PressAction.TURN_OFF -> actions.turnOff(entity)
         PressAction.RUN -> actions.run(entity)
+        PressAction.ASSIST_TALK -> openVoice(entity)
+        PressAction.ASSIST_TYPE -> openCard(entity)
         PressAction.NONE -> {}
     }
 }

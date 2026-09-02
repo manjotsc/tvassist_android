@@ -7,6 +7,7 @@ import androidx.compose.material.icons.rounded.Autorenew
 import androidx.compose.material.icons.rounded.Blinds
 import androidx.compose.material.icons.rounded.Bolt
 import androidx.compose.material.icons.rounded.Cyclone
+import androidx.compose.material.icons.rounded.Forum
 import androidx.compose.material.icons.rounded.DeviceThermostat
 import androidx.compose.material.icons.rounded.HelpOutline
 import androidx.compose.material.icons.rounded.Lightbulb
@@ -47,6 +48,7 @@ fun domainIcon(entity: Entity): ImageVector = when (entity.domain) {
     "automation" -> Icons.Rounded.SmartToy
     "button", "input_button" -> Icons.Rounded.TouchApp
     "person", "device_tracker" -> Icons.Rounded.Person
+    "conversation" -> Icons.Rounded.Forum
     "map" -> Icons.Rounded.Map
     "sensor", "binary_sensor" -> Icons.Rounded.Sensors
     else -> Icons.Rounded.Power
@@ -155,6 +157,7 @@ fun domainIconifyName(entity: Entity): String? = when (entity.domain) {
     "cover" -> "mdi:window-shutter"
     "script" -> "mdi:script-text"
     "automation" -> "mdi:robot"
+    "conversation" -> "mdi:forum"
     "scene" -> "mdi:palette"
     "button", "input_button" -> "mdi:gesture-tap-button"
     "person" -> "mdi:account"

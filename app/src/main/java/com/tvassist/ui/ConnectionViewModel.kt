@@ -29,6 +29,7 @@ import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.onStart
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 
@@ -52,6 +53,14 @@ class ConnectionViewModel(
 
     private val _importerLoading = MutableStateFlow(false)
     val importerLoading: StateFlow<Boolean> = _importerLoading.asStateFlow()
+
+    // Assist pipelines for the Triggers page. Null = not loaded, or the request failed — which is
+    // deliberately distinct from an instance that genuinely has none configured.
+    private val _assistPipelines = MutableStateFlow<com.tvassist.data.ha.AssistPipelines?>(null)
+    val assistPipelines: StateFlow<com.tvassist.data.ha.AssistPipelines?> = _assistPipelines.asStateFlow()
+
+    private val _assistPipelinesLoading = MutableStateFlow(false)
+    val assistPipelinesLoading: StateFlow<Boolean> = _assistPipelinesLoading.asStateFlow()
 
     private val _importSearch = MutableStateFlow("")
     val importSearch: StateFlow<String> = _importSearch.asStateFlow()
@@ -424,6 +433,39 @@ class ConnectionViewModel(
         viewModelScope.launch { settingsStore.setTriggerKeyCode(keyCode) }
     }
 
+    fun setMicKeyCode(keyCode: Int) {
+        viewModelScope.launch { settingsStore.setMicKeyCode(keyCode) }
+    }
+
+
+
+    fun setAssistMicId(micKey: String) {
+        viewModelScope.launch { settingsStore.setAssistMicId(micKey) }
+    }
+
+    fun setAssistPipelineId(pipelineId: String) {
+        viewModelScope.launch { settingsStore.setAssistPipelineId(pipelineId) }
+    }
+
+    /**
+     * Loads the Assist pipelines for the settings picker. Asked for on demand rather than kept in
+     * sync: pipelines are edited in Home Assistant, not here, and the only screen that cares is the
+     * one the user has just opened.
+     */
+    fun loadAssistPipelines() {
+        viewModelScope.launch {
+            _assistPipelinesLoading.value = true
+            // Opening this page straight after launch beats the WebSocket to it, and asking early
+            // just returns null — an error banner on a perfectly healthy instance. Wait for the
+            // connection first, but not forever: a genuinely unreachable HA still has to report.
+            withTimeoutOrNull(CONNECT_WAIT_MS) {
+                repository.connectionState.first { it == ConnectionState.Connected }
+            }
+            _assistPipelines.value = repository.fetchAssistPipelines()
+            _assistPipelinesLoading.value = false
+        }
+    }
+
     fun setAutoCloseSeconds(seconds: Int) {
         viewModelScope.launch { settingsStore.setAutoCloseSeconds(seconds) }
     }
@@ -700,10 +742,14 @@ class ConnectionViewModel(
 /** Maximum columns a layout row may have. */
 const val MAX_COLUMNS = 12
 
+// How long the pipeline fetch waits for the WebSocket before reporting a failure. Generous: the
+// cost of waiting is a spinner, the cost of giving up early is an error on a healthy instance.
+private const val CONNECT_WAIT_MS = 8_000L
+
 // Preferred ordering of entity categories (domains); others follow alphabetically.
 private val CATEGORY_ORDER = listOf(
     "climate", "light", "switch", "fan", "cover", "lock", "media_player", "camera",
-    "vacuum", "scene", "script", "automation", "input_boolean", "input_button",
+    "vacuum", "scene", "script", "automation", "conversation", "input_boolean", "input_button",
     "button", "binary_sensor", "sensor",
 )
 

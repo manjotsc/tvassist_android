@@ -16,6 +16,10 @@
     <uses-permission
         android:name="android.permission.READ_EXTERNAL_STORAGE"
         android:maxSdkVersion="29" />
+    <!-- Voice input for Assist: raw PCM is streamed to Home Assistant, which does the
+         speech-to-text. Runtime-granted, and the app works fully without it (typing still works). -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+
     <!-- Restart the keep-alive service after a reboot. -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
@@ -25,6 +29,10 @@
         android:required="true" />
     <uses-feature
         android:name="android.hardware.touchscreen"
+        android:required="false" />
+    <!-- Plenty of TV boxes have no mic; Assist voice is optional, typing is not. -->
+    <uses-feature
+        android:name="android.hardware.microphone"
         android:required="false" />
 
     <application
