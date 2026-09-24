@@ -4,12 +4,14 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.tvassist.data.ha.ConnectionState
+import com.tvassist.ui.cards.EntityControlActions
+import com.tvassist.ui.cards.shownTileStyle
+import com.tvassist.ui.cards.stylesFor
 import com.tvassist.data.ha.Entity
 import com.tvassist.data.ha.HaRepository
 import com.tvassist.data.web.SetupWebServer
 import com.tvassist.data.settings.DisplayCorner
 import com.tvassist.data.settings.OverlayLayout
-import com.tvassist.data.settings.OverlayPill
 import com.tvassist.data.settings.OverlayRow
 import com.tvassist.data.settings.OverlayTile
 import com.tvassist.data.settings.Settings
@@ -222,6 +224,17 @@ class ConnectionViewModel(
         )
     }
 
+    /**
+     * The styles a saved tile may take — from the **live** entity wherever one has loaded.
+     *
+     * A stub built from the id alone is not good enough any more. A light's rungs depend on what
+     * the bulb can do (`supportsBrightness`, `supportsColorTemp`), and those read attributes a stub
+     * does not have, so every light looked like an on/off bulb and the picker offered nothing but
+     * Auto and Standard. Null means the entity is not loaded and no judgement can be made.
+     */
+    private fun stylesForEntityId(entityId: String): List<String>? =
+        entities.value.firstOrNull { it.entityId == entityId }?.let { stylesFor(it) }
+
     fun cycleTileStyle(i: Int, t: Int) = updateLayout { l ->
         l.copy(
             rows = l.rows.mapIndexed { idx, r ->
@@ -233,8 +246,18 @@ class ConnectionViewModel(
                             if (ti != t) {
                                 tile
                             } else {
-                                val next = OverlayTile.CYCLE[(OverlayTile.CYCLE.indexOf(tile.style) + 1) % OverlayTile.CYCLE.size]
-                                tile.copy(style = next)
+                                // The styles *this* entity supports, not the global six. A light
+                                // was previously offered "Climate card" and rendered an empty
+                                // thermostat header; a sensor was offered "Square" and rendered a
+                                // camera tile with no camera. With nothing loaded there is nothing
+                                // to cycle through, so the tile is left alone.
+                                val choices = stylesForEntityId(tile.entityId) ?: return@mapIndexed tile
+                                // From what the chip shows, not the raw value: an unoffered style
+                                // reads as Auto, and indexing the raw one (-1) would land on Auto
+                                // again, making the first press look dead.
+                                val shown = shownTileStyle(entities.value.firstOrNull { it.entityId == tile.entityId }, tile.style)
+                                val at = choices.indexOf(shown)
+                                tile.copy(style = choices[(at + 1) % choices.size])
                             }
                         },
                     )
@@ -271,6 +294,14 @@ class ConnectionViewModel(
     /** Set the map source (auto/osm/google) for a person tile. */
     fun setTileMapProvider(i: Int, t: Int, provider: String) = updateTile(i, t) { it.copy(mapProvider = provider) }
 
+    /**
+     * Add or remove one feature row on an HA-tile, Home Assistant's `features:` list.
+     *
+     * An empty list means *auto* — every feature the entity supports — so the two edges need care.
+     * Turning one off while on auto has to start from [available] and subtract, or the tile would
+     * jump from showing everything to showing one thing. And turning the last one off returns to
+     * auto rather than storing an empty explicit list, which would be indistinguishable from it.
+     */
 
     // --- Web onboarding (enter credentials from a phone browser) ---
     private val _webOnboarding = MutableStateFlow<WebOnboarding>(WebOnboarding.Off)
@@ -282,6 +313,11 @@ class ConnectionViewModel(
     private var setupServer: SetupWebServer? = null
 
     init {
+        // Styles the entity's card does not offer are deliberately NOT rewritten here. A start-up
+        // pass once reset them to Auto and saved it, which threw away every 1.1.5 Square/Compact/
+        // Full choice on the first launch. The renderer and the editor both read them through
+        // [shownTileStyle]/[resolveTileStyle] instead, and 1.1.5's vocabulary is translated on read
+        // by [OverlayLayout.decodeStored].
         // Auto-connect once on launch if we already have stored credentials.
         viewModelScope.launch {
             val stored = settingsStore.settings.first()
@@ -706,7 +742,7 @@ class ConnectionViewModel(
         }
     }
 
-    private suspend fun applyRestore(result: Result<com.tvassist.data.settings.SettingsBackup>) {
+    private fun applyRestore(result: Result<com.tvassist.data.settings.SettingsBackup>) {
         result
             .onSuccess { backup ->
                 _backupStatus.value =
