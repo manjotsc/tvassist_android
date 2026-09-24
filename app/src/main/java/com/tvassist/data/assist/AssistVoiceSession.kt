@@ -310,6 +310,11 @@ class AssistVoiceSession(
         runId?.let { repository.stopAssistPipeline(it) }
         runId = null
         handlerId = null
+        // Cancelled, not just forgotten. [stopMic] normally ends the loop on its own, but a read
+        // blocked on a wedged AudioRecord would otherwise keep the coroutine — and the mic — alive
+        // past the exchange that owned it. Safe to call from inside the job itself: everything
+        // after this point in [fail] is non-suspending and still runs.
+        captureJob?.cancel()
         captureJob = null
     }
 
