@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="120" height="120" viewBox="0 0 100 100" role="img" aria-label="TV Assist">
+  <!-- Converted from app/src/main/res/drawable/ic_brand_logo.xml (the launcher/banner mark).
+       The app clips that tile's corners in code; here the clip is part of the image. -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="70" y2="100" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#5FD8FF"/>
+      <stop offset="1" stop-color="#0E9AD6"/>
+    </linearGradient>
+    <clipPath id="tile">
+      <rect width="100" height="100" rx="22" ry="22"/>
+    </clipPath>
+  </defs>
+  <g clip-path="url(#tile)">
+    <rect width="100" height="100" fill="url(#bg)"/>
+    <path fill="#FFFFFF" d="M35,35 H65 A15,15 0 0 1 80,50 A15,15 0 0 1 65,65 H35 A15,15 0 0 1 20,50 A15,15 0 0 1 35,35 Z"/>
+    <path fill="#0E9AD6" d="M53,50 a12,12 0 1 0 24,0 a12,12 0 1 0 -24,0 Z"/>
+  </g>
+</svg>
