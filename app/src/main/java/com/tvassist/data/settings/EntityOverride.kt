@@ -17,6 +17,13 @@ data class EntityOverride(
     val singlePress: String = PressAction.DEFAULT,
     /** Action for a long press. */
     val longPress: String = PressAction.DEFAULT,
+    /**
+     * Action for two quick presses — Home Assistant's `double_tap_action`, which it also defaults
+     * to none. The default matters more here than upstream: detecting a second press means holding
+     * the first one back for [com.tvassist.ui.cards.DOUBLE_TAP_MS], so a tile with this unset must
+     * fire on the press itself. Leave it alone and nothing is delayed.
+     */
+    val doublePress: String = PressAction.NONE,
     /** How the tile's on/off highlight is decided (see [DisplayState]). */
     val displayState: String = DisplayState.AUTO,
     /** For [DisplayState.MIRROR]: the entity whose state drives this tile's on/off highlight. */

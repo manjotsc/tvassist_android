@@ -17,7 +17,19 @@ data class LocalCamera(
     val snapshotUrl: String = "",
     /** auto / exoplayer / vlc. */
     val player: String = "auto",
-    /** Reload the URL when the clip ends, for "rolling clip" cameras that return a short finite MP4
-     *  per request (e.g. Québec 511) instead of a continuous stream — keeps them live. */
+    /** Reload the URL when the clip ends, for "rolling clip" cameras that return a short looped
+     *  video per request instead of a continuous stream — keeps them live. */
     val refresh: Boolean = false,
+    /**
+     * Optional smaller stream from the same camera (a Tapo's `/stream2`, a Hikvision's `/102`),
+     * played instead of [streamUrl] while another app holds the TV's hardware video decoder.
+     *
+     * That is the whole of its job. While Netflix (or any DRM app) has a video open — even paused —
+     * this TV refuses every other app a hardware decoder, so a camera decodes in software. Measured
+     * on the UR3: the 4K main stream froze, dropped 32% of frames and took the TV's memory down
+     * with it within a minute; this camera's `/stream2`, in software beside Netflix, played 92 s
+     * with one dropped frame. Blank means none, and a busy decoder then shows the camera's snapshot
+     * instead of live video (see CameraSource.UNAVAILABLE).
+     */
+    val lowResUrl: String = "",
 )

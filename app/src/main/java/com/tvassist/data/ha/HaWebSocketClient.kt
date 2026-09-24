@@ -1,6 +1,7 @@
 package com.tvassist.data.ha
 
 import android.util.Log
+import com.tvassist.BuildConfig
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -16,6 +17,7 @@ import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -100,7 +102,11 @@ class HaWebSocketClient {
     private var reconnectJob: kotlinx.coroutines.Job? = null
     private var reconnectAttempt = 0
 
-    // Command ids we issue during setup so we can recognise their replies.
+    // Command ids we issue during setup so we can recognise their replies. Volatile for the same
+    // reason as the fields above: [setTrackedIds] re-issues get_states from a Dispatchers.Default
+    // coroutine while [handleMessage] matches the reply on OkHttp's reader thread. Without the
+    // barrier the reader can miss the new id, drop the reply through both `when` arms, and leave
+    // the entity list unrefreshed after an import or a new pill binding.
     @Volatile private var getStatesId = -1
 
     /**
@@ -318,7 +324,59 @@ class HaWebSocketClient {
             }
             put("target", buildJsonObject { put("entity_id", entityId) })
         }
+        // Debug builds only, and the counterpart of the `state_changed` log below: together they
+        // show a command and HA's echo of it, which is the only way to tell "we never sent it" from
+        // "HA refused it" from "something else undid it a moment later".
+        if (BuildConfig.DEBUG) Log.d(TAG, "call_service $domain.$service $entityId ${data ?: ""}")
         ws.send(json.encodeToString(JsonObject.serializer(), payload))
+    }
+
+    /**
+     * [callService], but waits for HA's `result` and returns its error message — null when the call
+     * succeeded. For the commands where a refusal has to reach the screen: an alarm panel answers a
+     * wrong code by raising, and a fire-and-forget call leaves the panel as it was with nothing
+     * anywhere saying why. No answer at all counts as an error, since it is not the same as done.
+     *
+     * The debug log leaves `code` out. It is the alarm's PIN, and logcat is readable over adb.
+     */
+    suspend fun callServiceChecked(
+        domain: String,
+        service: String,
+        entityId: String,
+        data: Map<String, JsonElement>? = null,
+    ): String? {
+        // "" is success inside the timeout block, so a timeout's null cannot be mistaken for one.
+        val outcome = withTimeoutOrNull(REQUEST_TIMEOUT_MS) {
+            suspendCancellableCoroutine<String> { cont ->
+                val ws = currentSocket
+                if (ws == null) {
+                    cont.resume(NOT_CONNECTED_MESSAGE)
+                    return@suspendCancellableCoroutine
+                }
+                val id = msgId.incrementAndGet()
+                pendingResults[id] = { msg -> if (cont.isActive) cont.resume(serviceCallError(msg) ?: "") }
+                cont.invokeOnCancellation { pendingResults.remove(id) }
+                if (BuildConfig.DEBUG) {
+                    Log.d(TAG, "call_service $domain.$service $entityId ${data?.keys?.minus("code") ?: ""} (checked)")
+                }
+                ws.send(
+                    json.encodeToString(
+                        JsonObject.serializer(),
+                        buildJsonObject {
+                            put("id", id)
+                            put("type", "call_service")
+                            put("domain", domain)
+                            put("service", service)
+                            if (!data.isNullOrEmpty()) {
+                                put("service_data", buildJsonObject { data.forEach { (k, v) -> put(k, v) } })
+                            }
+                            put("target", buildJsonObject { put("entity_id", entityId) })
+                        },
+                    ),
+                )
+            }
+        } ?: return "No answer from Home Assistant"
+        return outcome.ifEmpty { null }
     }
 
     /**
@@ -424,7 +482,12 @@ class HaWebSocketClient {
         // instance with no speech-to-text configured does. Turn it into the error event the rest of
         // the pipeline already knows how to report.
         pendingResults[id] = { msg ->
-            val ok = msg?.get("success")?.jsonPrimitive?.contentOrNull?.toBoolean() ?: false
+            // A null message means the socket dropped before HA answered, not that HA said no.
+            // [failPendingResults] is already about to deliver its own connection-lost event for
+            // this run; reporting a rejected pipeline here would beat it to the subscription (the
+            // session unsubscribes on the first error) and blame the user's pipeline config for
+            // what was a lost connection.
+            val ok = msg == null || msg["success"]?.jsonPrimitive?.booleanOrNull == true
             if (!ok) {
                 val reason = (msg?.get("error") as? JsonObject)
                     ?.get("message")?.jsonPrimitive?.contentOrNull
@@ -511,7 +574,9 @@ class HaWebSocketClient {
     fun toggle(entity: Entity) {
         val service = when (entity.domain) {
             "scene", "script" -> "turn_on"
-            "cover" -> if (entity.isOn) "close_cover" else "open_cover"
+            // isOn is always false for a cover (its states are open/closed), so this used to
+            // resolve to open_cover in both directions — the cover could never be closed.
+            "cover" -> if (entity.isOpen) "close_cover" else "open_cover"
             "lock" -> if (entity.isLocked) "unlock" else "lock"
             else -> "toggle"
         }
@@ -631,6 +696,18 @@ class HaWebSocketClient {
             "result" -> {
                 val id = msg["id"]?.jsonPrimitive?.contentOrNull?.toIntOrNull()
                 val pending = if (id != null) pendingResults.remove(id) else null
+                // A plain `call_service` is fire-and-forget — nothing registers a waiter for its id,
+                // so before this a service HA *rejected* (a mode that is not in the entity's list, a
+                // device that errored) did nothing at all and said nothing at all. The UI then shows
+                // the old value and looks like a display bug rather than a refused command.
+                if (msg["success"]?.jsonPrimitive?.booleanOrNull == false) {
+                    val err = msg["error"]?.jsonObject
+                    Log.w(
+                        TAG,
+                        "HA refused command #$id: ${err?.get("code")?.jsonPrimitive?.contentOrNull} " +
+                            (err?.get("message")?.jsonPrimitive?.contentOrNull ?: ""),
+                    )
+                }
                 when {
                     pending != null -> pending(msg)
                     id == getStatesId -> {
@@ -669,6 +746,12 @@ class HaWebSocketClient {
                 val newState = data["new_state"]?.jsonObject
                 if (newState != null) {
                     Entity.fromStateJson(newState)?.let { updated ->
+                        // Debug builds only: the one place to see what HA actually echoed back
+                        // after a command. Release builds would be logging every state change on a
+                        // busy instance, which is both noise and a privacy leak.
+                        if (BuildConfig.DEBUG) {
+                            Log.d(TAG, "state_changed ${updated.entityId} = ${updated.state} ${updated.attributes}")
+                        }
                         synchronized(entityMap) { entityMap[updated.entityId] = updated }
                         // Location-bearing entities (people/device-trackers) publish immediately so a
                         // map view reflects HA's new position with no coalescing delay; everything else
@@ -684,6 +767,7 @@ class HaWebSocketClient {
     }
 
     companion object {
+
         private const val TAG = "HaWebSocketClient"
         // Coalesce bursts of state_changed events. Higher = fewer recompositions (smoother
         // UI on large/busy HA instances) at the cost of a little state-update latency.
@@ -709,4 +793,22 @@ class HaWebSocketClient {
             return "$withScheme/api/websocket"
         }
     }
+}
+
+internal const val NOT_CONNECTED_MESSAGE = "Not connected to Home Assistant"
+
+/**
+ * HA's refusal in a `result` message, or null when the call succeeded. A null [msg] is how
+ * `failPendingResults` wakes a waiter whose socket dropped, so it reads as not connected.
+ *
+ * Only an explicit `success: true` counts as success. Anything else — `false`, or a message
+ * missing the field — is a refusal, since claiming a command went through when it did not is
+ * the one mistake an alarm keypad cannot make.
+ */
+internal fun serviceCallError(msg: JsonObject?): String? = when {
+    msg == null -> NOT_CONNECTED_MESSAGE
+    msg["success"]?.jsonPrimitive?.contentOrNull == "true" -> null
+    else -> (msg["error"] as? JsonObject)?.get("message")?.jsonPrimitive?.contentOrNull
+        ?.takeIf { it.isNotBlank() }
+        ?: "Home Assistant refused the command"
 }

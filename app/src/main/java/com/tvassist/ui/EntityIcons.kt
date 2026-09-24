@@ -6,23 +6,23 @@ import androidx.compose.material.icons.rounded.Air
 import androidx.compose.material.icons.rounded.Autorenew
 import androidx.compose.material.icons.rounded.Blinds
 import androidx.compose.material.icons.rounded.Bolt
-import androidx.compose.material.icons.rounded.Cyclone
-import androidx.compose.material.icons.rounded.Forum
 import androidx.compose.material.icons.rounded.DeviceThermostat
-import androidx.compose.material.icons.rounded.HelpOutline
+import androidx.compose.material.icons.rounded.Forum
+import androidx.compose.material.icons.rounded.Home
 import androidx.compose.material.icons.rounded.Lightbulb
 import androidx.compose.material.icons.rounded.Lock
+import androidx.compose.material.icons.rounded.Shield
+import androidx.compose.material.icons.rounded.NotificationsActive
+import androidx.compose.material.icons.rounded.RemoveModerator
 import androidx.compose.material.icons.rounded.LockOpen
 import androidx.compose.material.icons.rounded.Map
 import androidx.compose.material.icons.rounded.Person
 import androidx.compose.material.icons.rounded.PlayCircle
 import androidx.compose.material.icons.rounded.Power
 import androidx.compose.material.icons.rounded.PowerSettingsNew
-import androidx.compose.material.icons.rounded.Home
 import androidx.compose.material.icons.rounded.Sensors
 import androidx.compose.material.icons.rounded.SmartToy
 import androidx.compose.material.icons.rounded.Speaker
-import androidx.compose.material.icons.rounded.Speed
 import androidx.compose.material.icons.rounded.Star
 import androidx.compose.material.icons.rounded.ToggleOn
 import androidx.compose.material.icons.rounded.TouchApp
@@ -38,10 +38,17 @@ import com.tvassist.data.ha.Entity
 fun domainIcon(entity: Entity): ImageVector = when (entity.domain) {
     "light" -> Icons.Rounded.Lightbulb
     "switch", "input_boolean" -> Icons.Rounded.ToggleOn
-    "climate" -> Icons.Rounded.DeviceThermostat
+    // HA derives a thermostat's icon from its hvac mode, not from the domain — a snowflake while
+    // cooling, a flame while heating. One static gauge made "dry at 17.5°" and "off" look alike.
+    "climate" -> hvacModeIcon(entity.state)
     "camera" -> Icons.Rounded.Videocam
     "fan" -> Icons.Rounded.Air
     "lock" -> if (entity.isLocked) Icons.Rounded.Lock else Icons.Rounded.LockOpen
+    "alarm_control_panel" -> when (entity.state) {
+        "disarmed" -> Icons.Rounded.RemoveModerator
+        "triggered" -> Icons.Rounded.NotificationsActive
+        else -> Icons.Rounded.Shield
+    }
     "media_player" -> Icons.Rounded.PlayCircle
     "cover" -> Icons.Rounded.Blinds
     "script" -> Icons.Rounded.Bolt
@@ -51,6 +58,7 @@ fun domainIcon(entity: Entity): ImageVector = when (entity.domain) {
     "conversation" -> Icons.Rounded.Forum
     "map" -> Icons.Rounded.Map
     "sensor", "binary_sensor" -> Icons.Rounded.Sensors
+    "air_quality" -> Icons.Rounded.Air
     else -> Icons.Rounded.Power
 }
 
@@ -149,10 +157,44 @@ fun deviceClassIconifyName(entity: Entity): String? {
 fun domainIconifyName(entity: Entity): String? = when (entity.domain) {
     "light" -> "mdi:lightbulb"
     "switch", "input_boolean" -> "mdi:toggle-switch-variant"
-    "climate" -> "mdi:thermostat"
+    // The same icon HA gives an `aqi` device class, so the domain entity and the per-pollutant
+    // sensors that replaced it look like the same thing.
+    "air_quality" -> "mdi:air-filter"
+    // HA derives a thermostat's icon from its hvac mode, not from the domain
+    // (`climateHvacModeIcon`, dev 2026-09-16). It has to be done *here*, on the MDI path:
+    // `domainIcon` is only the fallback if the icon fetch fails, so changing it there — as this
+    // first tried — was dead code that never rendered.
+    "climate" -> when (entity.state) {
+        "cool" -> "mdi:snowflake"
+        "dry" -> "mdi:water-percent"
+        "fan_only" -> "mdi:fan"
+        "auto" -> "mdi:thermostat-auto"
+        "heat" -> "mdi:fire"
+        "off" -> "mdi:power"
+        "heat_cool" -> "mdi:sun-snowflake-variant"
+        else -> "mdi:thermostat"
+    }
     "fan" -> "mdi:fan"
     "camera" -> "mdi:video"
     "lock" -> if (entity.isLocked) "mdi:lock" else "mdi:lock-open-variant"
+    // Upstream's three: up to date, available, and downloading while an install runs.
+    "update" -> when {
+        entity.updateInProgress -> "mdi:package-down"
+        entity.state == "on" -> "mdi:package-up"
+        else -> "mdi:package"
+    }
+    // Upstream's per-state shields (`alarmPanelIcon`), so the tile says which mode, not just "armed".
+    "alarm_control_panel" -> when (entity.state) {
+        "armed_home" -> "mdi:shield-home"
+        "armed_away" -> "mdi:shield-lock"
+        "armed_night" -> "mdi:shield-moon"
+        "armed_vacation" -> "mdi:shield-airplane"
+        "armed_custom_bypass" -> "mdi:security"
+        "pending", "arming" -> "mdi:shield-outline"
+        "triggered" -> "mdi:bell-ring"
+        "disarmed" -> "mdi:shield-off"
+        else -> "mdi:shield"
+    }
     "media_player" -> "mdi:cast"
     "cover" -> "mdi:window-shutter"
     "script" -> "mdi:script-text"
@@ -181,6 +223,39 @@ fun hvacModeColor(mode: String): Color = when (mode.lowercase()) {
     else -> Color(0xFFF39C12)
 }
 
+/**
+ * Colour for a lock state, from HA's own `--state-lock-*` tokens (dev, 2026-09-15): locked is
+ * green, unlocked / open / jammed are red, and the transitional states are orange.
+ *
+ * Note this is the opposite axis from [com.tvassist.ui.cards.stateActive], which calls an
+ * *unlocked* lock the active one. Both are upstream's: "active" means "wants your attention", and
+ * the colour then says whether that attention is good news or bad.
+ */
+fun lockStateColor(state: String): Color = when (state.lowercase()) {
+    "locked" -> Color(0xFF4CAF50)
+    "unlocked", "open", "jammed" -> Color(0xFFF44336)
+    "locking", "unlocking", "opening" -> Color(0xFFFF9800)
+    else -> Color(0xFF9E9E9E)
+}
+
+/**
+ * Colour for an alarm panel state: armed green, arming / pending / disarming orange, triggered red,
+ * and disarmed purple.
+ *
+ * The first three follow a lock's colours and HA's own. Disarmed is where it parts from the lock:
+ * an unlocked door is the exception and earns red, but a panel sits disarmed all day while people
+ * are home, so red there would be on screen for hours meaning nothing — and would already be spent
+ * when the alarm actually went off. Purple is simply a colour no other alarm state uses. Not grey,
+ * which reads as unavailable, and not blue, which was tried and turned down.
+ */
+fun alarmStateColor(state: String): Color = when {
+    state.startsWith("armed_") -> Color(0xFF4CAF50)
+    state == "triggered" -> Color(0xFFF44336)
+    state == "arming" || state == "pending" || state == "disarming" -> Color(0xFFFF9800)
+    state == "disarmed" -> Color(0xFFAB47BC)
+    else -> Color(0xFF9E9E9E)
+}
+
 /** Icon for a climate HVAC mode (its value is also the entity state). */
 fun hvacModeIcon(mode: String): ImageVector = when (mode.lowercase()) {
     "off" -> Icons.Rounded.PowerSettingsNew
@@ -192,17 +267,6 @@ fun hvacModeIcon(mode: String): ImageVector = when (mode.lowercase()) {
     else -> Icons.Rounded.DeviceThermostat
 }
 
-/** Icon for a climate fan mode; falls back to a generic fan glyph. */
-fun fanModeIcon(mode: String): ImageVector = when (mode.lowercase()) {
-    "auto" -> Icons.Rounded.Autorenew
-    "low", "quiet", "silent" -> Icons.Rounded.Air
-    "medium", "mid" -> Icons.Rounded.Speed
-    "high", "turbo", "focus" -> Icons.Rounded.Cyclone
-    else -> Icons.Rounded.Air
-}
-
-/** A no-icon fallback used where an [ImageVector] is required but unknown. */
-val UnknownIcon: ImageVector = Icons.Rounded.HelpOutline
 
 /** Curated icons the user can assign to an entity (key, label, vector). */
 val CUSTOM_ICONS: List<Triple<String, String, ImageVector>> = listOf(

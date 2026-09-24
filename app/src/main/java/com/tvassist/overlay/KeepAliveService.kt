@@ -31,10 +31,10 @@ import com.tvassist.TvAssistApp
 import com.tvassist.data.notify.NotificationServer
 import com.tvassist.data.settings.OverlayAppearance
 import com.tvassist.data.settings.OverlayDisplay
-import com.tvassist.ui.FixedPillsOverlay
-import com.tvassist.ui.NotificationOverlay
+import com.tvassist.ui.notify.FixedPillsOverlay
+import com.tvassist.ui.notify.NotificationOverlay
 import com.tvassist.ui.OverlayDisplays
-import com.tvassist.ui.VoiceBar
+import com.tvassist.ui.voice.VoiceBar
 import com.tvassist.ui.overlayThemeOf
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -48,6 +48,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
+import com.tvassist.ui.notify.NotificationEnlarged
 
 /**
  * Keeps the app process (and its HA WebSocket connection) resident so the control overlay is
@@ -328,9 +329,9 @@ class KeepAliveService : Service() {
                     var voiceInset by remember { mutableStateOf(0.dp) }
                     OverlayDisplays(disp)
                     FixedPillsOverlay(pills, app.haRepository)
-                    NotificationOverlay(items, app.haRepository, theme, bottomInset = voiceInset)
+                    NotificationOverlay(items, app.haRepository, theme, bottomInset = voiceInset, enlargedId = enlargedId)
                     VoiceBar(voiceUi, voiceLevel, theme) { voiceInset = it }
-                    com.tvassist.ui.NotificationEnlarged(items, enlargedId, app.haRepository)
+                    com.tvassist.ui.notify.NotificationEnlarged(items, enlargedId, app.haRepository)
                 }
             }
         }

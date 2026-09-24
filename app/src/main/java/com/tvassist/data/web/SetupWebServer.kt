@@ -124,6 +124,7 @@ class SetupWebServer(
                     snapshotUrl = f["snapshotUrl"]?.trim().orEmpty(),
                     player = f["player"]?.trim()?.takeIf { it.isNotBlank() } ?: "auto",
                     refresh = f["refresh"] != null,
+                    lowResUrl = f["lowResUrl"]?.trim().orEmpty(),
                 ),
             )
         }
@@ -393,6 +394,12 @@ class SetupWebServer(
                 <label>Stream URL</label>
                 <input name="streamUrl" inputmode="url" autocapitalize="off" autocorrect="off"
                   placeholder="rtsp://user:pass@192.168.1.20:554/stream" value="${escape(editing?.streamUrl ?: "")}">
+                <label>Low-res stream URL (optional)</label>
+                <input name="lowResUrl" inputmode="url" autocapitalize="off" autocorrect="off"
+                  placeholder="rtsp://user:pass@192.168.1.20:554/stream2" value="${escape(editing?.lowResUrl ?: "")}">
+                <p class="muted" style="margin:4px 0 8px">Played instead while another app (Netflix, a video app) is using
+                  the TV's video decoder — often the same address ending in <code>/stream2</code>.
+                  Without one, it shows the camera's snapshot instead.</p>
                 <label>Snapshot URL (optional)</label>
                 <input name="snapshotUrl" inputmode="url" autocapitalize="off" autocorrect="off"
                   placeholder="http://192.168.1.20/snapshot.jpg" value="${escape(editing?.snapshotUrl ?: "")}">
@@ -404,7 +411,7 @@ class SetupWebServer(
                 </select>
                 <label style="display:flex;align-items:center;gap:8px;margin-top:8px">
                   <input type="checkbox" name="refresh" value="1" style="width:auto"${if (editing?.refresh == true) " checked" else ""}>
-                  Keep refreshing (reload when the clip ends — for rolling-clip cameras like Québec 511)
+                  Keep refreshing (reload when the clip ends — for cameras that serve a short looped video)
                 </label>
                 <button type="submit">${if (editing != null) "Save changes" else "Add camera"}</button>
                 ${if (editing != null) "<a class=\"back\" href=\"/cameras\" style=\"display:block;text-align:center;margin-top:12px\">Cancel</a>" else ""}

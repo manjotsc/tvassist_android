@@ -59,11 +59,12 @@ class OverlayService : Service() {
     private val openFullscreenId = MutableStateFlow<String?>(null)
     // True while the bar plays its exit animation, just before the window is removed.
     private val closing = MutableStateFlow(false)
-    private val controlActions by lazy { com.tvassist.ui.EntityControlActions(app.haRepository) }
+    private val controlActions by lazy { com.tvassist.ui.cards.EntityControlActions(app.haRepository) }
 
     private lateinit var windowManager: WindowManager
     private var overlayView: View? = null
     private var lifecycleOwner: OverlayLifecycleOwner? = null
+
 
     private val handler = Handler(Looper.getMainLooper())
     @Volatile
@@ -75,6 +76,10 @@ class OverlayService : Service() {
     // Never dismiss while a fullscreen camera/map is open, even if a stray timer slipped through
     // the scheduling guards — a fullscreen popup is only closed with BACK.
     private val autoCloseRunnable = Runnable { if (!dismissBlocked()) hideSidebar() }
+    // Named, not a lambda, so [showSidebar] can take it back off the queue. As an anonymous
+    // postDelayed it could not be cancelled, which is what let a show land during the exit
+    // animation and still be followed by the removal it had just countermanded.
+    private val removeRunnable = Runnable { removeSidebarNow() }
 
     /**
      * True while the sidebar must stay put regardless of inactivity: a fullscreen camera/map is
@@ -118,7 +123,8 @@ class OverlayService : Service() {
         when (intent?.action) {
             ACTION_SHOW -> showSidebar()
             ACTION_HIDE -> hideSidebar()
-            ACTION_TOGGLE -> if (overlayView == null) showSidebar() else hideSidebar()
+            // A bar mid-exit counts as gone: toggling during the close animation asks for it back.
+            ACTION_TOGGLE -> if (overlayView == null || closing.value) showSidebar() else hideSidebar()
             ACTION_ASSIST -> app.voice.trigger()
         }
         return START_STICKY
@@ -129,7 +135,18 @@ class OverlayService : Service() {
 
     private fun showSidebar() {
         Log.i(TAG, "sidebar opening")
-        if (overlayView != null) return
+        // The window is still attached while the exit animation plays, so the guard below would
+        // swallow the request AND leave the queued removal to fire — the bar would vanish in answer
+        // to a press asking for it. Two taps of the trigger key land inside that ~280ms window
+        // easily. Call off the removal and reuse the window that is already up.
+        if (overlayView != null) {
+            if (closing.value) {
+                handler.removeCallbacks(removeRunnable)
+                closing.value = false
+                scheduleAutoClose()
+            }
+            return
+        }
         if (!canDrawOverlays()) {
             Log.w(TAG, "Overlay permission not granted; cannot show sidebar")
             return
@@ -194,7 +211,6 @@ class OverlayService : Service() {
                             handler.removeCallbacks(autoCloseRunnable) // don't auto-close while watching
                         },
                         onCloseCard = { openCardId.value = null; scheduleAutoClose() },
-                        onCloseFullscreen = { openFullscreenId.value = null; scheduleAutoClose() },
                     )
                     }
                 }
@@ -293,11 +309,12 @@ class OverlayService : Service() {
         }
         handler.removeCallbacks(autoCloseRunnable)
         closing.value = true
-        handler.postDelayed({ removeSidebarNow() }, look.animSpeedMs.toLong() + 60L)
+        handler.postDelayed(removeRunnable, look.animSpeedMs.toLong() + 60L)
     }
 
     private fun removeSidebarNow() {
         handler.removeCallbacks(autoCloseRunnable)
+        handler.removeCallbacks(removeRunnable)
         closing.value = false
         openCardId.value = null
         openFullscreenId.value = null

@@ -1,5 +1,7 @@
 package com.tvassist.overlay
 
+import com.tvassist.ui.cards.map.MapCardTile
+
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.EnterTransition
 import androidx.compose.animation.ExitTransition
@@ -11,9 +13,9 @@ import androidx.compose.animation.core.MutableTransitionState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.aspectRatio
@@ -26,7 +28,6 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -51,45 +52,59 @@ import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.foundation.BorderStroke
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import androidx.tv.material3.Border
-import androidx.tv.material3.ClickableSurfaceDefaults
 import androidx.tv.material3.ExperimentalTvMaterial3Api
-import androidx.tv.material3.Surface
 import androidx.tv.material3.Text
 import com.tvassist.data.ha.Entity
 import com.tvassist.data.ha.HaRepository
 import com.tvassist.data.settings.OverlayAppearance
 import com.tvassist.data.settings.OverlayLayout
 import com.tvassist.data.settings.OverlayPill
+import com.tvassist.data.settings.PressAction
 import com.tvassist.data.settings.OverlayPosition
 import com.tvassist.data.settings.OverlayRow
 import com.tvassist.data.settings.OverlayTile
-import com.tvassist.ui.CameraTile
-import com.tvassist.ui.EntityControlActions
-import com.tvassist.ui.EntityControlCard
-import com.tvassist.ui.HaTile
-import com.tvassist.ui.InlineClimateTile
-import com.tvassist.ui.SubText
-import com.tvassist.ui.TrackBar
+import com.tvassist.ui.cards.camera.CameraTile
+import com.tvassist.ui.cards.EntityControlActions
+import com.tvassist.ui.cards.EntityControlCard
+import com.tvassist.ui.cards.EntityControlPanel
+import com.tvassist.ui.cards.HaTile
+import com.tvassist.ui.cards.InlineControlTile
+import com.tvassist.ui.cards.cardFor
+import com.tvassist.ui.cards.climate.InlineClimateTile
+import com.tvassist.ui.cards.TrackBar
+import com.tvassist.ui.cards.resolveTileStyle
+import com.tvassist.ui.cards.light.rememberInlineBrightness
+import com.tvassist.ui.cards.TILE_ROW_HEIGHT
+import com.tvassist.ui.cards.stateTint
+import com.tvassist.ui.cards.entityStatus
 import com.tvassist.ui.cap
-import com.tvassist.data.settings.EntityOverride
 import com.tvassist.ui.CameraPlayerScreen
-import com.tvassist.ui.PeopleMapMember
-import com.tvassist.ui.PeopleMapScreen
-import com.tvassist.ui.PersonMapScreen
+import com.tvassist.data.settings.EntityOverride
+import com.tvassist.ui.maps.PeopleMapMember
+import com.tvassist.ui.maps.PeopleMapScreen
+import com.tvassist.ui.maps.PersonMapScreen
 import com.tvassist.ui.EntityIconContent
 import com.tvassist.ui.LocalOverlayTheme
-import com.tvassist.ui.displayIcon
-import com.tvassist.ui.displayName
-import com.tvassist.ui.effectiveOn
-import com.tvassist.ui.domainIcon
-import com.tvassist.ui.fmt
-import com.tvassist.ui.performPress
+import com.tvassist.ui.cards.displayIcon
+import com.tvassist.ui.cards.displayName
+import com.tvassist.ui.cards.effectiveOn
+import com.tvassist.ui.cards.performPress
+import com.tvassist.ui.cards.rememberPress
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+
+/** How much of an `icon` tile the glyph occupies, measured against the tile's shorter side. */
+private const val ICON_GLYPH_FRACTION = 0.46f
+
+/**
+ * The narrowest a Normal tile can be and still draw its brightness bar.
+ *
+ * The bar is a fixed 96dp; with the chip (36dp) and the tile's own horizontal padding (22dp) in
+ * front of it, anything under this has the Row compress it into a grey disc. Two columns of a
+ * 320dp panel is 142dp, so this is the line between a one-column row and the rest.
+ */
+private val STANDARD_BAR_MIN_WIDTH = 170.dp
 
 /**
  * The control overlay drawn over other apps as a floating rounded panel. Its content is
@@ -119,7 +134,6 @@ fun SidebarContent(
     onOpenAssist: (Entity) -> Unit,
     onLaunchFullscreen: (Entity) -> Unit,
     onCloseCard: () -> Unit,
-    onCloseFullscreen: () -> Unit,
 ) {
     val allEntities by repository.entities.collectAsStateWithLifecycle()
     val savedLayout by layout.collectAsStateWithLifecycle()
@@ -152,7 +166,10 @@ fun SidebarContent(
             Box(modifier = cardMod.clip(RoundedCornerShape(20.dp)).background(Color.Black)) {
                 when {
                     fsEntity.domain == "camera" ->
-                        CameraPlayerScreen(entity = fsEntity, repository = repository, onBack = onCloseFullscreen)
+                        CameraPlayerScreen(
+                            entity = fsEntity, repository = repository,
+                            inOverlay = true,
+                        )
                     fsEntity.isMapCard -> {
                         // A map card is a synthetic entity carrying its members/zoom/source in attributes.
                         val members = fsEntity.mapCardMembers.map { (id, opts) ->
@@ -165,7 +182,6 @@ fun SidebarContent(
                             zoom = fsEntity.mapCardZoom,
                             mapProvider = fsEntity.mapCardProvider,
                             showLegend = fsEntity.mapCardShowLegend,
-                            onBack = onCloseFullscreen,
                         )
                     }
                     else -> {
@@ -176,7 +192,6 @@ fun SidebarContent(
                             repository = repository,
                             options = fsTile?.personOptions ?: OverlayTile.PERSON_DEFAULTS,
                             mapProvider = fsTile?.mapProvider ?: OverlayTile.MAP_AUTO,
-                            onBack = onCloseFullscreen,
                         )
                     }
                 }
@@ -185,9 +200,12 @@ fun SidebarContent(
         return
     }
 
-    // A control card open over the panel takes over the whole overlay surface.
     val openEntity = openId?.let { id -> allEntities.firstOrNull { it.entityId == id } }
-    if (openEntity != null) {
+    // The Assist card is the one that still takes over the surface, and deliberately: it accepts
+    // typed input with the IME opening over it and holds a transcript worth reading, neither of
+    // which survives a 320dp column at the screen edge. OverlayService.dismissBlocked() already
+    // special-cases it for the same reason. Every other entity now docks into the panel below.
+    if (openEntity != null && openEntity.isConversation) {
         EntityControlCard(entity = openEntity, actions = actions, onDismiss = onCloseCard)
         return
     }
@@ -211,8 +229,12 @@ fun SidebarContent(
     // The panel animates in (AnimatedVisibility), so the first tile isn't placed yet on the initial
     // frame — requestFocus() would no-op and leave nothing focused (dead D-pad). Retry until the
     // requester is attached (covers the longest enter animation).
-    LaunchedEffect(firstTileId, pos) {
-        if (firstTileId != null) {
+    //
+    // `openEntity == null` is a key for the same reason: a card now renders *inside* the panel
+    // rather than replacing the whole surface, so this effect is no longer disposed and re-created
+    // around one. Without it, closing a card would leave the D-pad with nothing focused.
+    LaunchedEffect(firstTileId, pos, openEntity == null) {
+        if (openEntity == null && firstTileId != null) {
             repeat(30) {
                 if (runCatching { firstItemFocus.requestFocus() }.isSuccess) return@LaunchedEffect
                 delay(30)
@@ -242,7 +264,8 @@ fun SidebarContent(
     } else {
         Modifier
     }
-    val panelWidth = if (pos.isVertical) 320.dp else 720.dp
+    // Shared with the Home Assistant-page backend so the two cannot drift; see [PanelMetrics].
+    val panelWidth = PanelMetrics.widthDp(pos).dp
 
     // Open/close motion. `closing` is flipped true by the service just before it removes the window,
     // giving the exit transition time to play; the enter transition runs once on first composition.
@@ -271,7 +294,7 @@ fun SidebarContent(
 
     // Overlay "size" scales the whole bar uniformly (dp + sp) by boosting the local density; the
     // outer margin stays in the real density so it doesn't grow/shrink with size.
-    val sizeFactor = look.sizeScale.coerceIn(50, 200) / 100f
+    val sizeFactor = PanelMetrics.sizeFactor(look)
     val baseDensity = LocalDensity.current
 
     Box(
@@ -282,30 +305,45 @@ fun SidebarContent(
             LocalDensity provides Density(baseDensity.density * sizeFactor, baseDensity.fontScale),
         ) {
             AnimatedVisibility(visibleState = visibleState, enter = enter, exit = exit) {
-                Column(
-                    modifier = Modifier
-                        .width(panelWidth)
-                        .heightIn(max = 620.dp)
-                        .clip(panelShape)
-                        .background(panelBrush)
-                        .then(borderMod)
-                        .verticalScroll(rememberScrollState())
-                        .padding(14.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    effectiveLayout.rows.forEach { row ->
-                        LayoutRow(
-                            row = row,
-                            byId = byId,
-                            overrideMap = overrideMap,
-                            actions = actions,
-                            onOpenEntity = onOpenEntity,
-                            onOpenAssist = onOpenAssist,
-                            onLaunchFullscreen = onLaunchFullscreen,
-                            repository = repository,
-                            firstTileId = firstTileId,
-                            firstFocus = firstItemFocus,
-                        )
+                // The panel's own geometry and chrome, worn by whichever of the two is showing. A
+                // card gets the bar's exact width, slot, corner radius, gradient and border, so
+                // opening an entity reads as the bar changing content rather than a centred card
+                // and a full-screen dim landing over whatever is playing. It also picks up the
+                // overlay size setting for free, which as a separate surface it never did.
+                val panelMod = Modifier
+                    .width(panelWidth)
+                    .heightIn(max = PanelMetrics.MAX_HEIGHT_DP.dp)
+                    .clip(panelShape)
+                    .background(panelBrush)
+                    .then(borderMod)
+                if (openEntity != null) {
+                    EntityControlPanel(
+                        entity = openEntity,
+                        actions = actions,
+                        onDismiss = onCloseCard,
+                        modifier = panelMod,
+                    )
+                } else {
+                    Column(
+                        modifier = panelMod
+                            .verticalScroll(rememberScrollState())
+                            .padding(14.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        effectiveLayout.rows.forEach { row ->
+                            LayoutRow(
+                                row = row,
+                                byId = byId,
+                                overrideMap = overrideMap,
+                                actions = actions,
+                                onOpenEntity = onOpenEntity,
+                                onOpenAssist = onOpenAssist,
+                                onLaunchFullscreen = onLaunchFullscreen,
+                                repository = repository,
+                                firstTileId = firstTileId,
+                                firstFocus = firstItemFocus,
+                            )
+                        }
                     }
                 }
             }
@@ -359,10 +397,14 @@ private fun LayoutRow(
     row.title.takeIf { it.isNotBlank() }?.let {
         Text(it, color = LocalOverlayTheme.current.subText, fontSize = 13.sp, modifier = Modifier.padding(start = 4.dp, top = 4.dp))
     }
+    // Measured once for the whole row so every line's squares match, including a short final one.
     row.tiles.chunked(cols).forEach { line ->
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
+            // Tiles in one row need not be the same height — a square Icon tap beside a plain row,
+            // say — and the default Top alignment left the shorter ones hanging from the ceiling.
+            verticalAlignment = Alignment.CenterVertically,
         ) {
             line.forEach { tile ->
                 val entity = byId[tile.entityId] ?: Entity(tile.entityId, "unavailable", tile.entityId)
@@ -380,79 +422,11 @@ private fun LayoutRow(
                     repository = repository,
                     resolve = { byId[it] },
                     modifier = mod,
+                    soleInLine = cols == 1,
                 )
             }
             // Pad short final lines so tiles keep a consistent width.
             repeat(cols - line.size) { Box(Modifier.weight(1f)) {} }
-        }
-    }
-}
-
-/** A map card in the grid: a single tile (icon + label + count) that opens the fullscreen map. */
-@OptIn(ExperimentalTvMaterial3Api::class)
-@Composable
-private fun MapCardTile(
-    entity: Entity,
-    override: EntityOverride?,
-    repository: HaRepository,
-    name: String,
-    showIcon: Boolean,
-    showStatus: Boolean,
-    count: Int,
-    onOpen: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    val th = LocalOverlayTheme.current
-    Surface(
-        onClick = onOpen,
-        modifier = modifier,
-        shape = ClickableSurfaceDefaults.shape(RoundedCornerShape(18.dp)),
-        colors = ClickableSurfaceDefaults.colors(
-            containerColor = th.tile,
-            focusedContainerColor = th.tileFocused,
-            // Follows the palette: the container above is themed, so white content vanished on a
-            // light theme (same white-on-white failure as the slider labels).
-            contentColor = th.text,
-            focusedContentColor = th.text,
-        ),
-        scale = ClickableSurfaceDefaults.scale(focusedScale = 1.045f),
-        border = ClickableSurfaceDefaults.border(
-            focusedBorder = Border(BorderStroke(2.5.dp, th.focus), shape = RoundedCornerShape(18.dp)),
-        ),
-    ) {
-        // Mirrors HaTile: no text at all means the icon is the only content, so the chip is square
-        // and centred and the tile shrinks to match every other icon-only tile in the row. Without
-        // this the name fell back to "Map" and the count always drew, so hiding Name and Status
-        // still left a text column forcing the tile wider than its neighbours.
-        val subtitle = if (showStatus) (if (count == 1) "1 location" else "$count locations") else ""
-        val hasText = name.isNotBlank() || subtitle.isNotBlank()
-        val iconOnly = showIcon && !hasText
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 11.dp, vertical = 9.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = if (iconOnly) Arrangement.Center else Arrangement.Start,
-        ) {
-            if (showIcon) {
-                Box(
-                    modifier = Modifier.size(if (iconOnly) 36.dp else 54.dp, if (iconOnly) 36.dp else 40.dp)
-                        .clip(RoundedCornerShape(8.dp)).background(th.chip),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    // Honor a custom icon set under Customize entities (falls back to the map glyph).
-                    EntityIconContent(entity, override, th.subText, sizeDp = 22, repository = repository)
-                }
-            }
-            if (hasText) {
-                if (showIcon) Spacer(Modifier.width(11.dp))
-                Column(Modifier.weight(1f)) {
-                    if (name.isNotBlank()) {
-                        Text(name, fontSize = 14.sp, color = th.text, maxLines = 1)
-                    }
-                    if (subtitle.isNotBlank()) {
-                        Text(subtitle, fontSize = 11.sp, color = th.subText, maxLines = 1)
-                    }
-                }
-            }
         }
     }
 }
@@ -507,6 +481,14 @@ private fun LayoutTile(
     repository: HaRepository,
     resolve: (String) -> Entity?,
     modifier: Modifier = Modifier,
+    /**
+     * Whether this tile is the only one on its line.
+     *
+     * A tile that shares its line has neighbours Left and Right must be able to reach, so the ones
+     * that would otherwise take those keys for themselves — the Normal light row's inline
+     * brightness — stand down. Alone on a line there is nowhere sideways to go and nothing is lost.
+     */
+    soleInLine: Boolean = true,
 ) {
     // A map card is a synthetic entity — render its own tile and open the fullscreen map on click.
     if (entity.isMapCard) {
@@ -520,18 +502,21 @@ private fun LayoutTile(
             count = entity.mapCardMembers.size,
             onOpen = { onLaunchFullscreen(entity) },
             modifier = modifier,
+            style = resolveTileStyle(entity, tile.style),
+            resolve = { byId -> resolve(byId) },
         )
         return
     }
 
-    val effectiveStyle = when (tile.style) {
-        OverlayTile.STYLE_AUTO -> when (entity.domain) {
-            "climate" -> OverlayTile.STYLE_CLIMATE
-            "camera" -> OverlayTile.STYLE_SQUARE
-            else -> OverlayTile.STYLE_FULL
-        }
-        else -> tile.style
-    }
+    // Resolves Auto *and* anything the entity's card does not offer — a style saved back when the
+    // picker handed all six to everything. See [resolveTileStyle].
+    //
+    // Icon tap is an explicit choice and nothing else. A tile with its name and status hidden used
+    // to be coerced into one, which meant hiding the text in the layout editor silently changed the
+    // tile's *shape* — two quite different intents arriving at one renderer, and a row could end up
+    // mixing squares with rows without anyone having asked for a square. Such a tile now keeps the
+    // style it was given and simply draws no text, which HaTile already centres.
+    val effectiveStyle = resolveTileStyle(entity, tile.style)
 
     val name = if (tile.hideName) "" else displayName(entity, override)
     val icon = displayIcon(entity, override)
@@ -544,6 +529,13 @@ private fun LayoutTile(
         entity.domain == "camera" || entity.isPerson -> ({ onLaunchFullscreen(entity) })
         else -> ({ performPress(override?.longPress ?: "default", entity, actions, onOpenEntity, single = false, openVoice = onOpenAssist) })
     }
+    // HA's `double_tap_action`. Null unless the entity actually has one, so the overwhelmingly
+    // common tile keeps firing on the press instead of waiting out the double-tap window.
+    val twice = (override?.doublePress ?: PressAction.NONE).takeIf { it != PressAction.NONE }
+    val press = rememberPress(
+        onSingle = primary,
+        onDouble = twice?.let { { performPress(it, entity, actions, onOpenEntity, single = true, openVoice = onOpenAssist) } },
+    )
 
     when (effectiveStyle) {
         OverlayTile.STYLE_CLIMATE ->
@@ -556,39 +548,129 @@ private fun LayoutTile(
             HaTile(
                 icon = icon,
                 iconOn = effectiveOn(entity, override, resolve),
+                // The bulb's own colour where it has one; null everywhere else falls back to
+                // the theme's on/off icon colours exactly as before. See [stateTint].
+                iconTint = stateTint(entity),
                 iconContent = { tint -> EntityIconContent(entity, override, tint, repository = repository) },
                 showIcon = !tile.hideIcon,
                 title = name,
                 subtitle = if (tile.hideStatus) "" else "Run",
-                onClick = primary,
+                onClick = press,
                 onLongClick = more,
                 modifier = modifier,
             )
 
-        OverlayTile.STYLE_COMPACT ->
-            HaTile(
-                icon = icon,
-                iconOn = effectiveOn(entity, override, resolve),
-                iconContent = { tint -> EntityIconContent(entity, override, tint, repository = repository) },
-                showIcon = !tile.hideIcon,
-                title = name,
-                subtitle = if (tile.hideStatus) "" else tileSubtitle(entity),
-                onClick = primary,
-                onLongClick = more,
-                modifier = modifier,
-            )
+        // A square, the icon and nothing else. Press toggles; hold still opens the card.
+        OverlayTile.STYLE_ICON ->
+            // One height, always [TILE_ROW_HEIGHT]. The column count decides the button's width
+            // and nothing else, so a row of these never changes how tall its line is and they sit
+            // level with every other tile in the panel.
+            //
+            // Being *square* was the goal for several rounds and it was the wrong goal: a square
+            // has to grow taller as the columns get fewer, which is the one thing that kept looking
+            // wrong. 292dp at one column, then a 108dp cap, then 92dp at three — each fix moved the
+            // number without removing the coupling, and tying height to width is what made it
+            // impossible to satisfy. At four or five columns the slot is near enough 54dp that the
+            // button still reads as a square; it simply is not forced to be one.
+            //
+            // The glyph sits straight on the tile — no chip. Three sizes were tried with one
+            // (0.56, 0.42, 0.52) and the problem was never the size: a rounded chip inside a
+            // rounded tile is a box in a box, and a disc inside it is two unrelated shapes.
+            BoxWithConstraints(modifier) {
+                // Against the shorter side, so neither a wide button nor a narrow one in a
+                // twelve-column row grows a glyph bigger than the tile holding it.
+                val glyph = (minOf(maxWidth, TILE_ROW_HEIGHT).value * ICON_GLYPH_FRACTION)
+                    .toInt()
+                    .coerceAtLeast(12)
+                val lit = effectiveOn(entity, override, resolve)
+                // The chip's filled background used to carry the on state. Without it the glyph has
+                // to: its own colour when the bulb reports one, the accent otherwise. Two greys a
+                // shade apart is not a state you can read from a sofa.
+                val th = LocalOverlayTheme.current
+                HaTile(
+                    icon = icon,
+                    iconOn = lit,
+                    iconTint = stateTint(entity) ?: if (lit) th.accent else null,
+                    iconContent = { tint ->
+                        EntityIconContent(entity, override, tint, glyph, repository)
+                    },
+                    showIcon = true,
+                    title = "",
+                    subtitle = "",
+                    onClick = press,
+                    onLongClick = more,
+                    modifier = Modifier.fillMaxWidth().height(TILE_ROW_HEIGHT),
+                    iconSize = glyph,
+                    iconChip = false,
+                )
+            }
 
-        else -> // STYLE_FULL
-            HaTile(
+        // Normal: the row, with its level adjustable in place rather than printed and inert.
+        OverlayTile.STYLE_STANDARD -> {
+            val level = rememberInlineBrightness(entity, actions, adjustable = soleInLine)
+            // Measured because the bar cannot be squeezed. It is a fixed 96dp beside a 36dp chip and
+            // the tile's own padding, so under about [STANDARD_BAR_MIN_WIDTH] the Row compresses it
+            // into a grey disc that reads as a broken element rather than as a level. Hiding the
+            // text is *not* the test — a Normal tile is an icon and a brightness bar whether or not
+            // it is labelled — only whether the tile is wide enough to draw one.
+            BoxWithConstraints(modifier) {
+                val roomForBar = maxWidth >= STANDARD_BAR_MIN_WIDTH
+                HaTile(
+                    icon = icon,
+                    iconOn = effectiveOn(entity, override, resolve),
+                    iconTint = stateTint(entity),
+                    iconContent = { tint -> EntityIconContent(entity, override, tint, repository = repository) },
+                    showIcon = !tile.hideIcon,
+                    title = name,
+                    subtitle = if (tile.hideStatus) "" else entityStatus(entity, compact = true),
+                    onClick = press,
+                    onLongClick = more,
+                    modifier = Modifier.fillMaxWidth().then(level.modifier),
+                    trailing = if (entity.isOn && roomForBar) {
+                        { TrackBar(level.pct, Modifier.width(96.dp), height = 26) }
+                    } else {
+                        null
+                    },
+                )
+            }
+        }
+
+        // The control ladder: a tile header with the domain's controls under it. Which controls a
+        // rung draws is the card's business — see [EntityCard.TileControls].
+        in OverlayTile.CONTROL_STYLES ->
+            InlineControlTile(
                 icon = icon,
                 iconOn = effectiveOn(entity, override, resolve),
+                // The bulb's own colour where it has one; null everywhere else falls back to
+                // the theme's on/off icon colours exactly as before. See [stateTint].
+                iconTint = stateTint(entity),
                 iconContent = { tint -> EntityIconContent(entity, override, tint, repository = repository) },
                 showIcon = !tile.hideIcon,
                 title = name,
-                subtitle = if (tile.hideStatus) "" else tileSubtitle(entity),
-                onClick = primary,
+                subtitle = if (tile.hideStatus) "" else entityStatus(entity, compact = true),
+                onClick = press,
                 onLongClick = more,
                 modifier = modifier,
+                trailing = { cardFor(entity).TileTrailing(entity, actions, effectiveStyle) },
+            ) {
+                cardFor(entity).TileControls(entity, actions, effectiveStyle)
+            }
+
+        else -> // STYLE_AUTO and anything unrecognised: the plain row.
+            HaTile(
+                icon = icon,
+                iconOn = effectiveOn(entity, override, resolve),
+                // The bulb's own colour where it has one; null everywhere else falls back to
+                // the theme's on/off icon colours exactly as before. See [stateTint].
+                iconTint = stateTint(entity),
+                iconContent = { tint -> EntityIconContent(entity, override, tint, repository = repository) },
+                showIcon = !tile.hideIcon,
+                title = name,
+                subtitle = if (tile.hideStatus) "" else entityStatus(entity, compact = true),
+                onClick = press,
+                onLongClick = more,
+                modifier = modifier,
+                // Read-only: how bright it is, not a control. The controls live on the rungs above.
                 trailing = if (entity.domain == "light" && entity.isOn) {
                     { TrackBar(entity.brightnessPct ?: 0, Modifier.width(96.dp), height = 26) }
                 } else {
@@ -596,15 +678,4 @@ private fun LayoutTile(
                 },
             )
     }
-}
-
-/** Short status line shown under a tile title. */
-private fun tileSubtitle(e: Entity): String = when {
-    e.isButton -> ""
-    // Its raw state is an ISO timestamp of the last use, which is unreadable on a tile.
-    e.isConversation -> "Assist"
-    e.domain == "light" -> if (e.isOn) (e.brightnessPct?.let { "$it%" } ?: "On") else "Off"
-    e.domain == "climate" -> e.currentTemperature?.let { "${cap(e.state)} · ${fmt(it)}°" } ?: cap(e.state)
-    e.domain == "switch" || e.domain == "input_boolean" || e.domain == "fan" -> if (e.isOn) "On" else "Off"
-    else -> cap(e.state)
 }

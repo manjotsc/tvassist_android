@@ -109,6 +109,22 @@ class HaRepository(
         runCatching { java.net.URI(url).host?.lowercase() }.getOrNull()
 
     /**
+     * Whether [url] is Home Assistant itself — [sameOrigin] with [baseUrl] — and so the
+     * one place the token may go.
+     *
+     * The image fetchers used to attach it to *any* absolute URL they were handed, and those are
+     * not all HA's: a local camera's snapshot URL, an image in a pushed notification, an
+     * `entity_picture` pointing at album art. Each of those sent the long-lived token — full admin
+     * access to the house — to a third party. Scheme is compared too, so an `http://` link to the
+     * right host cannot pull the token off an `https://` connection in the clear.
+     */
+    private fun isHaUrl(url: String): Boolean = sameOrigin(url, baseUrl)
+
+    /** Adds the HA token to a request for [url] only when [isHaUrl] says it is going to HA. */
+    private fun Request.Builder.haAuth(url: String): Request.Builder =
+        if (isHaUrl(url)) header("Authorization", "Bearer $token") else this
+
+    /**
      * Reads a response body, refusing anything over [MAX_BODY_BYTES].
      *
      * Decoding is already capped, but the *download* wasn't: a misconfigured camera returning a
@@ -214,17 +230,30 @@ class HaRepository(
         }
     }
 
-    /** Fetches a camera's current frame (JPEG/PNG bytes) via HA's camera_proxy, or null. */
-    suspend fun cameraSnapshot(entityId: String): ByteArray? = withContext(Dispatchers.IO) {
+    /**
+     * Fetches a camera's current frame (JPEG/PNG bytes) via HA's camera_proxy, or null.
+     *
+     * With [width] *and* [height], HA shrinks a JPEG before sending it — core does this itself
+     * (`scale_jpeg_camera_image`) whether or not the camera integration supports sizing, but only
+     * when both are given; `width` alone is ignored. A camera tile asks this every 5 s, and a 4K
+     * camera's full frame decodes to ~33 MB for a picture drawn a few hundred pixels wide.
+     */
+    suspend fun cameraSnapshot(entityId: String, width: Int? = null, height: Int? = null): ByteArray? =
+        withContext(Dispatchers.IO) {
         val base = baseUrl
         if (base.isBlank() || token.isBlank()) return@withContext null
+        val size = if (width != null && height != null) "?width=$width&height=$height" else ""
         runCatching {
             val req = Request.Builder()
-                .url("$base/api/camera_proxy/$entityId")
+                .url("$base/api/camera_proxy/$entityId$size")
                 .header("Authorization", "Bearer $token")
                 .build()
             haClient.newCall(req).execute().use { resp ->
-                Log.i(CAM, "snapshot($entityId) code=${resp.code}")
+                // Failures only, outside debug builds: a camera tile polls this every 5 s, so a
+                // line per success was ~12 log lines a minute per camera, drowning everything else.
+                if (!resp.isSuccessful || com.tvassist.BuildConfig.DEBUG) {
+                    Log.i(CAM, "snapshot($entityId) code=${resp.code}")
+                }
                 if (resp.isSuccessful) resp.cappedBytes("snapshot($entityId)") else null
             }
         }.onFailure { Log.w(CAM, "snapshot error for $entityId", it) }.getOrNull()
@@ -240,6 +269,14 @@ class HaRepository(
         entityId: String,
         data: Map<String, kotlinx.serialization.json.JsonElement>? = null,
     ) = client.callService(domain, service, entityId, data)
+
+    /** [callService] that reports HA's refusal; null on success. See the client's for why. */
+    suspend fun callServiceChecked(
+        domain: String,
+        service: String,
+        entityId: String,
+        data: Map<String, kotlinx.serialization.json.JsonElement>? = null,
+    ): String? = client.callServiceChecked(domain, service, entityId, data)
 
     /**
      * Asks a Home Assistant `conversation` agent something and waits for its answer.
@@ -382,6 +419,15 @@ class HaRepository(
             httpStrict.newCall(req).execute().use { resp ->
                 if (resp.isSuccessful) resp.cappedBytes("tile")?.let { BitmapFactory.decodeByteArray(it, 0, it.size) } else null
             }
+        }.onFailure {
+            // Debug builds only, and worth keeping: every failure here was swallowed by
+            // `getOrNull`, so a map that could not fetch a single tile rendered as its own dark
+            // background with nothing anywhere saying why. On the emulator that turned out to be
+            // `SSLHandshakeException: Chain validation failed` — an environment fault, invisible
+            // for as long as this was silent. Log the throwable, not its toString: that message is
+            // Conscrypt's wrapper, and the actual reason (a stapled OCSP response "out-of-date"
+            // against an emulator clock 16 h behind) was three causes down.
+            if (com.tvassist.BuildConfig.DEBUG) Log.w("HaRepository", "osm tile $key failed", it)
         }.getOrNull()?.also { tileCache.put(key, it) }
     }
 
@@ -506,7 +552,9 @@ class HaRepository(
             fetched.forEach { (dx, dy, t) ->
                 if (t != null) canvas.drawBitmap(t, centerLeft + dx * sz, centerTop + dy * sz, null)
             }
-            Log.i(CAM, "person map built for $lat,$lng")
+            // Debug builds only: these are someone's coordinates — for a map card, the house itself —
+            // written to a log any adb client can read, on every build of the map.
+            if (com.tvassist.BuildConfig.DEBUG) Log.i(CAM, "person map built for $lat,$lng")
             out
         }.onFailure { Log.w(CAM, "person map error", it) }.getOrNull()
     }
@@ -592,7 +640,7 @@ class HaRepository(
         pictureCache.get(path)?.let { return@withContext it }
         val url = absoluteUrl(path) ?: return@withContext null
         runCatching {
-            val req = Request.Builder().url(url).header("Authorization", "Bearer $token").build()
+            val req = Request.Builder().url(url).haAuth(url).build()
             clientFor(url).newCall(req).execute().use { resp ->
                 if (resp.isSuccessful) resp.cappedBytes("entity_picture")?.let { decodeSampled(it, MAX_AVATAR_PX) } else null
             }
@@ -607,18 +655,60 @@ class HaRepository(
      * ring — so a path-keyed cache would pin the first frame for the life of the process. Decoded to
      * [MAX_STILL_PX] rather than the avatar cap, since the card draws it full-width, not in a chip.
      */
-    suspend fun fetchStillImage(path: String): Bitmap? = withContext(Dispatchers.IO) {
+    suspend fun fetchStillImage(path: String, maxPx: Int = MAX_STILL_PX): Bitmap? = withContext(Dispatchers.IO) {
         val url = absoluteUrl(path) ?: return@withContext null
         runCatching {
             val req = Request.Builder().url(url)
-                .header("Authorization", "Bearer $token")
+                .haAuth(url)
                 .header("Cache-Control", "no-cache")
                 .build()
             clientFor(url).newCall(req).execute().use { resp ->
-                Log.i(CAM, "still($url) code=${resp.code}")
-                if (resp.isSuccessful) resp.cappedBytes("still")?.let { decodeSampled(it, MAX_STILL_PX) } else null
+                // Failures only outside debug builds — polled every 5 s per camera tile.
+                if (!resp.isSuccessful || com.tvassist.BuildConfig.DEBUG) {
+                    Log.i(CAM, "still(${safeUrlForLog(url)}) code=${resp.code}")
+                }
+                if (resp.isSuccessful) resp.cappedBytes("still")?.let { decodeSampled(it, maxPx) } else null
             }
         }.getOrNull()
+    }
+
+    /**
+     * Downloads a "rolling clip" — a short looped video that a camera URL re-publishes periodically
+     * (typically a few seconds of MP4, replaced every 30 s) — into [dest]. True on success.
+     *
+     * Written to a sibling temp file and renamed over [dest], so a player still reading the
+     * previous clip at that path keeps its open file (rename swaps the name, not the inode) and
+     * never sees half a download.
+     *
+     * The token is attached only if the clip is on HA itself ([haAuth]); credentials embedded in
+     * the URL are sent as Basic auth, which is what a player would have done with them.
+     */
+    suspend fun fetchClipTo(url: String, dest: java.io.File): Boolean = withContext(Dispatchers.IO) {
+        val tmp = java.io.File(dest.parentFile, dest.name + ".part")
+        runCatching {
+            val parsed = java.net.URI(url)
+            val req = Request.Builder().url(url).haAuth(url).header("Cache-Control", "no-cache").apply {
+                parsed.rawUserInfo?.takeIf { it.isNotBlank() && !isHaUrl(url) }?.let { info ->
+                    val user = java.net.URLDecoder.decode(info.substringBefore(':'), "UTF-8")
+                    val pass = java.net.URLDecoder.decode(info.substringAfter(':', ""), "UTF-8")
+                    header("Authorization", okhttp3.Credentials.basic(user, pass))
+                }
+            }.build()
+            clientFor(url).newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) {
+                    // Warned: a refusal here (Cloudflare's 403) is exactly what the back-off is
+                    // for, and it should be findable under the same tag as a stream failure.
+                    Log.w(CAM, "clip(${safeUrlForLog(url)}) code=${resp.code}")
+                    return@use false
+                }
+                val bytes = resp.cappedBytes("clip") ?: return@use false
+                if (bytes.isEmpty()) return@use false
+                tmp.writeBytes(bytes)
+                tmp.renameTo(dest)
+            }
+        }.onFailure {
+            Log.w(CAM, "clip(${safeUrlForLog(url)}) failed: ${it.javaClass.simpleName}: ${it.message}")
+        }.getOrDefault(false).also { if (!it) tmp.delete() }
     }
 
     /**
@@ -663,6 +753,7 @@ private fun LocalCamera.toEntity(): Entity = Entity(
         if (snapshotUrl.isNotBlank()) put("ta_snapshot_url", JsonPrimitive(snapshotUrl))
         put("ta_player", JsonPrimitive(player))
         if (refresh) put("ta_refresh", JsonPrimitive(true))
+        if (lowResUrl.isNotBlank()) put("ta_low_res_url", JsonPrimitive(lowResUrl))
     }),
 )
 

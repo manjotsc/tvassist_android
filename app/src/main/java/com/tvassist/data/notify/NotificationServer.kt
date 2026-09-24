@@ -54,7 +54,11 @@ class NotificationServer(
         fun fields() = if (req.method == "POST") jsonToFields(req.body) + req.query else req.query
         return when {
             req.path == "/notify" && (req.method == "POST" || req.method == "GET") -> {
-                val f = if (req.method == "POST") jsonToFields(req.body) else req.query
+                // fields(), like every other route: a POST merges its query string over its body.
+                // This was the one endpoint that read the body alone, so `POST /notify?duration=20`
+                // with a JSON body silently dropped the duration — and a query string on a POST is
+                // the documented shape here, since that is where `?token=` goes.
+                val f = fields()
                 val notif = fieldsToNotification(f)
                 if (notif != null) {
                     // id/duration/media only. The title and message are somebody's doorbell

@@ -21,3 +21,25 @@ internal const val REDACTED = "«redacted»"
  * is allowed to write down, and it applies whether or not anything is reading the log back.
  */
 fun safeUrlForLog(url: String): String = URL_USERINFO.replace(url, "$1$REDACTED@")
+
+/**
+ * Whether [url] has the same scheme, host and port as [base] — the test for "may this request carry
+ * the Home Assistant token". See `HaRepository.haAuth`.
+ *
+ * A default port counts as its explicit number, so `https://ha.lan` and `https://ha.lan:443` match.
+ * Scheme must match too: an `http://` link to the right host would otherwise send the token in the
+ * clear off an `https://` setup. Anything that fails to parse, or has no host, is not HA.
+ */
+internal fun sameOrigin(url: String, base: String): Boolean {
+    val a = runCatching { java.net.URI(url.trim()) }.getOrNull() ?: return false
+    val b = runCatching { java.net.URI(base.trim()) }.getOrNull() ?: return false
+    fun java.net.URI.effectivePort() = if (port != -1) port else when (scheme?.lowercase()) {
+        "https", "wss" -> 443
+        "http", "ws" -> 80
+        else -> -1
+    }
+    return a.host != null &&
+        a.scheme.equals(b.scheme, ignoreCase = true) &&
+        a.host.equals(b.host, ignoreCase = true) &&
+        a.effectivePort() == b.effectivePort()
+}

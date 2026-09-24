@@ -5,9 +5,13 @@
     <cloud-backup>
         <exclude domain="file" path="datastore/tv_assist_credentials.preferences_pb" />
         <exclude domain="file" path="tv_setup_cert.p12" />
+        <!-- The HA-page overlay writes the frontend's auth blob into WebView localStorage. -->
+        <exclude domain="file" path="app_webview" />
     </cloud-backup>
     <device-transfer>
         <exclude domain="file" path="datastore/tv_assist_credentials.preferences_pb" />
         <exclude domain="file" path="tv_setup_cert.p12" />
+        <!-- The HA-page overlay writes the frontend's auth blob into WebView localStorage. -->
+        <exclude domain="file" path="app_webview" />
     </device-transfer>
 </data-extraction-rules>

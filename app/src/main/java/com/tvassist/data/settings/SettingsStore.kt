@@ -29,6 +29,7 @@ import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.builtins.MapSerializer
 import kotlinx.serialization.builtins.serializer
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
 import java.io.File
 import java.io.IOException
 
@@ -514,7 +515,7 @@ class SettingsStore(private val context: Context) {
     /** Reads the overlay layout, migrating from the legacy flat sidebar list if absent. */
     private fun readLayout(prefs: Preferences): OverlayLayout {
         prefs[KEY_OVERLAY_LAYOUT]?.let {
-            return runCatching { json.decodeFromString(OverlayLayout.serializer(), it) }
+            return runCatching { OverlayLayout.decodeStored(json, json.parseToJsonElement(it)) }
                 .getOrElse { OverlayLayout.fromFlat(readSidebarIds(prefs)) }
         }
         return OverlayLayout.fromFlat(readSidebarIds(prefs))
@@ -633,6 +634,7 @@ class SettingsStore(private val context: Context) {
             val map = readOverrides(prefs).toMutableMap()
             val isEmpty = override.name.isBlank() && override.icon.isBlank() &&
                 override.singlePress == PressAction.DEFAULT && override.longPress == PressAction.DEFAULT &&
+                override.doublePress == PressAction.NONE &&
                 override.displayState == DisplayState.AUTO
             if (isEmpty) map.remove(override.entityId) else map[override.entityId] = override
             prefs[KEY_OVERRIDES] = json.encodeToString(overridesSerializer, map)
@@ -1020,10 +1022,6 @@ class SettingsStore(private val context: Context) {
         return out.sortedByDescending { it.timestampMs }
     }
 
-    /** Newest existing backup at [location] (files are named "tv-assist-<model>-<ts>.json"). */
-    private fun latestBackupFile(location: BackupLocation): File? =
-        backupFiles(location).maxByOrNull { it.lastModified() }
-
     /** All backup files at [location] (name "tv-assist-<model>-<ts>.json"), unordered. */
     private fun backupFiles(location: BackupLocation): List<File> =
         backupDir(location)
@@ -1182,7 +1180,14 @@ class SettingsStore(private val context: Context) {
         run {
             // Tolerate a UTF-8 BOM that some editors prepend.
             val cleaned = text.removePrefix("\uFEFF")
-            val backup = json.decodeFromString(SettingsBackup.serializer(), cleaned)
+            val tree = json.parseToJsonElement(cleaned)
+            // The layout goes through the same translation as a stored one: a 1.1.5 backup's tiles
+            // are in the old style vocabulary, and decoding it as a plain field would stamp it with
+            // the current [OverlayLayout.styleVersion] default and skip that.
+            val backup = json.decodeFromJsonElement(SettingsBackup.serializer(), tree).let { b ->
+                val stored = (tree as? JsonObject)?.get("overlayLayout")
+                if (stored is JsonObject) b.copy(overlayLayout = OverlayLayout.decodeStored(json, stored)) else b
+            }
             // Decrypt any passphrase-encrypted secrets (plaintext values pass through; a bad/blank
             // passphrase on an encrypted value yields "" so the rest of the restore still succeeds).
             val haToken = BackupCrypto.decrypt(backup.token, passphrase) ?: ""

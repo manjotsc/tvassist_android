@@ -9,7 +9,6 @@ import android.view.KeyEvent
 import com.tvassist.BuildConfig
 import android.view.accessibility.AccessibilityEvent
 import com.tvassist.TvAssistApp
-import com.tvassist.data.assist.VoiceController
 import com.tvassist.overlay.OverlayService
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers

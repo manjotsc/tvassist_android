@@ -173,9 +173,18 @@ class SoundPlayer(context: Context) {
         return at
     }
 
-    /** Decode [url]'s audio to 16-bit PCM. Returns null if it can't decode or exceeds [maxBytes]. */
+    /**
+     * Decode [url]'s audio to 16-bit PCM. Returns null if it can't decode or exceeds [maxBytes].
+     *
+     * The codec is released in [finally], not at each exit. It used to be released only on the
+     * paths that returned normally, so a decoder that threw — a malformed file, a format the TV
+     * cannot configure, a CodecException mid-loop — leaked a hardware decoder every time. Sounds
+     * are user-supplied URLs replayed on every doorbell ring, and MediaCodec instances are a
+     * limited global resource: enough failed rings and nothing on the TV can decode anything.
+     */
     private fun decodePcm(url: String, maxBytes: Int): Pcm? {
         val extractor = MediaExtractor()
+        var codec: MediaCodec? = null
         return try {
             extractor.setDataSource(url)
             var trackIndex = -1
@@ -188,9 +197,10 @@ class SoundPlayer(context: Context) {
             }
             if (trackIndex < 0 || format == null) return null
             extractor.selectTrack(trackIndex)
-            val codec = MediaCodec.createDecoderByType(format.getString(MediaFormat.KEY_MIME)!!)
-            codec.configure(format, null, null, 0)
-            codec.start()
+            val c = MediaCodec.createDecoderByType(format.getString(MediaFormat.KEY_MIME)!!)
+            codec = c
+            c.configure(format, null, null, 0)
+            c.start()
             val out = ByteArrayOutputStream()
             val info = MediaCodec.BufferInfo()
             var sampleRate = format.getInteger(MediaFormat.KEY_SAMPLE_RATE)
@@ -199,43 +209,42 @@ class SoundPlayer(context: Context) {
             var outEos = false
             while (!outEos) {
                 if (!inEos) {
-                    val inIndex = codec.dequeueInputBuffer(TIMEOUT_US)
+                    val inIndex = c.dequeueInputBuffer(TIMEOUT_US)
                     if (inIndex >= 0) {
-                        val buf = codec.getInputBuffer(inIndex)!!
+                        val buf = c.getInputBuffer(inIndex)!!
                         val size = extractor.readSampleData(buf, 0)
                         if (size < 0) {
-                            codec.queueInputBuffer(inIndex, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
+                            c.queueInputBuffer(inIndex, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
                             inEos = true
                         } else {
-                            codec.queueInputBuffer(inIndex, 0, size, extractor.sampleTime, 0)
+                            c.queueInputBuffer(inIndex, 0, size, extractor.sampleTime, 0)
                             extractor.advance()
                         }
                     }
                 }
-                val outIndex = codec.dequeueOutputBuffer(info, TIMEOUT_US)
+                val outIndex = c.dequeueOutputBuffer(info, TIMEOUT_US)
                 when {
                     outIndex >= 0 -> {
-                        val buf = codec.getOutputBuffer(outIndex)!!
+                        val buf = c.getOutputBuffer(outIndex)!!
                         val chunk = ByteArray(info.size)
                         buf.get(chunk); buf.clear()
                         out.write(chunk)
-                        codec.releaseOutputBuffer(outIndex, false)
-                        if (out.size() > maxBytes) { codec.stop(); codec.release(); return null }
+                        c.releaseOutputBuffer(outIndex, false)
+                        if (out.size() > maxBytes) return null
                         if (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) outEos = true
                     }
                     outIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
-                        val nf = codec.outputFormat
+                        val nf = c.outputFormat
                         sampleRate = nf.getInteger(MediaFormat.KEY_SAMPLE_RATE)
                         channels = nf.getInteger(MediaFormat.KEY_CHANNEL_COUNT)
                         // We interpret the PCM as 16-bit; if the decoder emits anything else (e.g.
                         // float), bail so the caller falls back to ExoPlayer rather than play noise.
                         val enc = if (nf.containsKey(MediaFormat.KEY_PCM_ENCODING))
                             nf.getInteger(MediaFormat.KEY_PCM_ENCODING) else AudioFormat.ENCODING_PCM_16BIT
-                        if (enc != AudioFormat.ENCODING_PCM_16BIT) { codec.stop(); codec.release(); return null }
+                        if (enc != AudioFormat.ENCODING_PCM_16BIT) return null
                     }
                 }
             }
-            codec.stop(); codec.release()
             // AudioTrack path only handles mono/stereo 16-bit; anything else → ExoPlayer fallback.
             if (channels !in 1..2) return null
             Pcm(out.toByteArray(), sampleRate, channels)
@@ -243,6 +252,9 @@ class SoundPlayer(context: Context) {
             Log.w(TAG, "decode failed: ${e.message}")
             null
         } finally {
+            // stop() throws on a codec that never started or already errored; both are fine to
+            // ignore, but release() must still run.
+            codec?.let { runCatching { it.stop() }; runCatching { it.release() } }
             runCatching { extractor.release() }
         }
     }

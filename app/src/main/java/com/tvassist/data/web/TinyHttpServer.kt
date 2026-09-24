@@ -97,8 +97,27 @@ abstract class TinyHttpServer(
 
     private fun acceptLoop() {
         val server = serverSocket ?: return
+        var failures = 0
         while (running) {
-            val socket = try { server.accept() } catch (e: Exception) { break }
+            val socket = try {
+                server.accept().also { failures = 0 }
+            } catch (e: Exception) {
+                // [stop] closes the socket to unblock accept(); that is the one exception that
+                // means "we are done". Anything else used to end the loop too — silently — so a
+                // passing error (out of file descriptors, a network change) left the notification
+                // server dead until the app restarted, with HA's pushes going nowhere and nothing
+                // in the log. Keep serving unless the socket itself is gone.
+                if (!running) break
+                if (server.isClosed) {
+                    Log.e(tag, "server socket closed unexpectedly; not accepting any more requests", e)
+                    break
+                }
+                failures++
+                Log.w(tag, "accept failed (#$failures), retrying", e)
+                // Back off so a persistent error cannot spin this thread: 100 ms doubling to 5 s.
+                runCatching { Thread.sleep((100L shl (failures - 1).coerceAtMost(6)).coerceAtMost(5_000L)) }
+                continue
+            }
             runCatching { socket.soTimeout = SOCKET_TIMEOUT_MS } // bound how long a client holds a worker
             val pool = workers
             if (pool == null) {
@@ -139,6 +158,13 @@ abstract class TinyHttpServer(
             if (i > 0) headers[line.substring(0, i).trim().lowercase()] = line.substring(i + 1).trim()
         }
         val len = headers["content-length"]?.toIntOrNull() ?: 0
+        // Say so, rather than truncating at the cap and handing [handle] half a document. Half a
+        // JSON body parses as nothing, so an oversized push came back as "empty notification" —
+        // a confusing report for "your payload was too big".
+        if (len > MAX_BODY_BYTES) {
+            write(socket.getOutputStream(), json("{\"ok\":false,\"error\":\"payload too large\"}", 413))
+            return
+        }
         val body = readBody(input, len)
         val resp = handle(HttpRequest(method, path, query, headers, body))
         write(socket.getOutputStream(), resp)

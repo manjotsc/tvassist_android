@@ -24,6 +24,7 @@ import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.tv.material3.Border
@@ -88,7 +89,16 @@ fun AccentButton(
                 Icon(leadingIcon, contentDescription = null, modifier = Modifier.size(if (dense) 15.dp else 18.dp))
                 Spacer(Modifier.width(if (dense) 6.dp else 8.dp))
             }
-            Text(label, fontSize = if (dense) 13.sp else 15.sp, fontWeight = FontWeight.Medium)
+            // Never wrap. Squeezed into half a tile by `features_position: inline`, "Unlock" broke
+            // into one letter per line and drew a six-row column; a button that cannot fit should
+            // clip, not restructure the layout around it.
+            Text(
+                label,
+                fontSize = if (dense) 13.sp else 15.sp,
+                fontWeight = FontWeight.Medium,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
         }
     }
 }
