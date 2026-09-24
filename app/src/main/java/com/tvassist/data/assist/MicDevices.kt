@@ -77,14 +77,6 @@ fun resolveInputDevice(context: Context, key: String): AudioDeviceInfo? {
         ?: devices.firstOrNull { it.type == type }
 }
 
-/** The human-readable name for a stored [key], for settings screens. */
-fun micChoiceLabel(context: Context, key: String): String = when {
-    key == MIC_AUTO -> "Auto"
-    key == MIC_RECOGNIZER -> "TV remote (system recogniser)"
-    else -> resolveInputDevice(context, key)?.let { deviceLabel(it) }
-        ?: key.removePrefix(DEVICE_PREFIX).substringAfter(':', "Unknown microphone")
-}
-
 private fun inputDevices(context: Context): List<AudioDeviceInfo> {
     val audio = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager ?: return emptyList()
     return runCatching {
