@@ -35,7 +35,6 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
-import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
@@ -161,6 +160,8 @@ fun CameraPlayerScreen(
     val globalPlayer by playerFlow.collectAsState(initial = "auto")
     // A local camera can pin its own engine; otherwise use the app-wide default.
     val streamPlayer = if (entity.isLocalCamera) entity.localPlayer else globalPlayer
+    // Only a local camera has the setting; an HA camera plays HA's HLS, which is not RTSP anyway.
+    val rtspTcp = !entity.isLocalCamera || entity.localRtspTcp
 
     Box(
         modifier = Modifier.fillMaxSize().background(Color.Black),
@@ -195,6 +196,7 @@ fun CameraPlayerScreen(
                 url = u, player = "vlc", modifier = Modifier.fillMaxSize(), captureKey = entity.entityId,
                 reloadOnEnd = reloadOnEnd, nextUrl = nextUrl,
                 onTooLargeForSoftware = { tooLarge = true },
+                rtspTcp = rtspTcp,
             )
         } else if (u != null) {
             var exoTexture by remember(u) { mutableStateOf<TextureView?>(null) }
@@ -210,14 +212,14 @@ fun CameraPlayerScreen(
                     .setPrioritizeTimeOverSizeThresholds(true)
                     .build()
                 ExoPlayer.Builder(context).setLoadControl(loadControl).build().apply {
-                    setMediaItem(MediaItem.fromUri(u))
+                    setStreamUrl(u, rtspTcp) // TCP for rtsp:// unless the camera opts out — see setStreamUrl
                     prepare()
                     playWhenReady = true
                     addListener(object : Player.Listener {
                         // The next clip: the newest downloaded copy, or — without a download — the URL
                         // again, whose next HTTP request pulls a fresh clip.
                         fun refetch() = runCatching {
-                            this@apply.setMediaItem(MediaItem.fromUri(nextUrl?.invoke() ?: u))
+                            this@apply.setStreamUrl(nextUrl?.invoke() ?: u, rtspTcp)
                             this@apply.prepare()
                             this@apply.playWhenReady = true
                         }

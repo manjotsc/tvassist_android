@@ -205,7 +205,10 @@ class MainActivity : ComponentActivity() {
         }
 
         val initialCardId = if (com.tvassist.BuildConfig.DEBUG) intent?.getStringExtra("card_id") else null
-        // Fullscreen camera/person launched from the overlay (always honored, not debug-only).
+        // Opens a camera / person map fullscreen. Nothing in the app sends these — the overlay draws
+        // its own camera and map in its window — so in practice this is an adb test hook:
+        // `am start -n com.tvassist/.ui.MainActivity --es open_camera camera.ta_<id>`. Unlike the
+        // hooks above it is not debug-only, so it works on a release build too.
         val initialCameraId = intent?.getStringExtra("open_camera")
         val initialPersonId = intent?.getStringExtra("open_person")
 
@@ -224,7 +227,11 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    // Re-read a fullscreen camera/person request when launched while already running.
+    // Re-read a fullscreen camera/person request when launched while already running. Only a
+    // single-top launch gets here: this activity is launchMode=standard, so a plain `am start`
+    // into the running task just brings it forward, drops the extras, and never calls this —
+    // while `am` still prints "delivered to currently running top-most instance". Pass
+    // `--activity-single-top`, or start a fresh task with `-f 0x10008000`.
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         if (intent.hasExtra("open_camera") || intent.hasExtra("open_person")) {

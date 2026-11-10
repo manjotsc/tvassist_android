@@ -50,10 +50,17 @@ internal fun CamerasPage(viewModel: ConnectionViewModel, onBack: () -> Unit) {
         WebSetupRow(viewModel, "Cameras")
         Spacer(Modifier.height(18.dp))
 
-        // Video player — applies to camera tiles and notification/person-map streams.
-        Text("Video player", fontSize = 14.sp, color = TxtMuted)
+        // Player for Home Assistant cameras — and only those (CameraPlayer reads it for a camera that
+        // is not a local one). A camera added on this page has its own Player, and a notification
+        // picks its player in the call. Both rows offer the same three chips, and this one used to
+        // be titled "Video player", so changing it to fix a camera added below did nothing visible.
+        Text("Player for Home Assistant cameras", fontSize = 14.sp, color = TxtMuted)
         Spacer(Modifier.height(2.dp))
-        Text("Engine for camera/video streams. VLC handles more cameras (HEVC, quirky RTSP); ExoPlayer is lighter.", fontSize = 12.sp, color = TxtMuted)
+        Text(
+            "Cameras added below each have their own Player setting — change it when editing the camera. " +
+                "VLC handles more cameras (HEVC, quirky RTSP); ExoPlayer is lighter.",
+            fontSize = 12.sp, color = TxtMuted,
+        )
         Spacer(Modifier.height(8.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             listOf("auto" to "Auto", "exoplayer" to "ExoPlayer", "vlc" to "VLC").forEach { (value, label) ->
@@ -114,13 +121,22 @@ internal fun CamerasPage(viewModel: ConnectionViewModel, onBack: () -> Unit) {
             Spacer(Modifier.height(4.dp))
             TvTextField(d.snapshotUrl, { draft = d.copy(snapshotUrl = it) }, "http://192.168.1.20/snapshot.jpg")
             Spacer(Modifier.height(12.dp))
-            Text("Player", color = TxtMuted, fontSize = 13.sp)
+            Text("Player for this camera", color = TxtMuted, fontSize = 13.sp)
             Spacer(Modifier.height(6.dp))
             FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 listOf("auto" to "Auto", "exoplayer" to "ExoPlayer", "vlc" to "VLC").forEach { (v, label) ->
                     ChipButton(label, d.player == v, onClick = { draft = d.copy(player = v) })
                 }
             }
+            Spacer(Modifier.height(12.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("RTSP over TCP", color = TxtPrimary, fontSize = 14.sp, modifier = Modifier.weight(1f))
+                ChipButton(if (d.rtspTcp) "On" else "Off", selected = d.rtspTcp, onClick = { draft = d.copy(rtspTcp = !d.rtspTcp) })
+            }
+            Text(
+                "Leave on unless the camera only streams over UDP. go2rtc and Frigate refuse UDP.",
+                color = TxtMuted, fontSize = 12.sp, modifier = Modifier.padding(top = 6.dp),
+            )
             Spacer(Modifier.height(12.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text("Keep refreshing", color = TxtPrimary, fontSize = 14.sp, modifier = Modifier.weight(1f))

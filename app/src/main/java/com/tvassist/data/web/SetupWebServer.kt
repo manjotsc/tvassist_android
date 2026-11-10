@@ -125,6 +125,9 @@ class SetupWebServer(
                     player = f["player"]?.trim()?.takeIf { it.isNotBlank() } ?: "auto",
                     refresh = f["refresh"] != null,
                     lowResUrl = f["lowResUrl"]?.trim().orEmpty(),
+                    // An unticked checkbox is simply absent from the form, so absent means UDP. The
+                    // box starts ticked for a new camera, which keeps TCP the default here too.
+                    rtspTcp = f["rtspTcp"] != null,
                 ),
             )
         }
@@ -409,6 +412,10 @@ class SetupWebServer(
                   ${opt("exoplayer", "ExoPlayer")}
                   ${opt("vlc", "VLC")}
                 </select>
+                <label style="display:flex;align-items:center;gap:8px;margin-top:8px">
+                  <input type="checkbox" name="rtspTcp" value="1" style="width:auto"${if (editing?.rtspTcp != false) " checked" else ""}>
+                  RTSP over TCP (leave on unless the camera only streams over UDP; go2rtc and Frigate refuse UDP)
+                </label>
                 <label style="display:flex;align-items:center;gap:8px;margin-top:8px">
                   <input type="checkbox" name="refresh" value="1" style="width:auto"${if (editing?.refresh == true) " checked" else ""}>
                   Keep refreshing (reload when the clip ends — for cameras that serve a short looped video)
