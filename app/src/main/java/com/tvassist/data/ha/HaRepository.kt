@@ -754,6 +754,7 @@ private fun LocalCamera.toEntity(): Entity = Entity(
         put("ta_player", JsonPrimitive(player))
         if (refresh) put("ta_refresh", JsonPrimitive(true))
         if (lowResUrl.isNotBlank()) put("ta_low_res_url", JsonPrimitive(lowResUrl))
+        if (!rtspTcp) put("ta_rtsp_tcp", JsonPrimitive(false))
     }),
 )
 
