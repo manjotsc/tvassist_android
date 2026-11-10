@@ -61,6 +61,8 @@ data class Entity(
     val localPlayer: String get() = attributes.str("ta_player")?.takeIf { it.isNotBlank() } ?: "auto"
     /** Reload the clip when it ends: "rolling clip" cameras that serve a short looped video, not a stream. */
     val localRefresh: Boolean get() = attributes.str("ta_refresh")?.toBoolean() ?: false
+    /** RTSP over TCP (the default) rather than UDP; see LocalCamera.rtspTcp. */
+    val localRtspTcp: Boolean get() = attributes.str("ta_rtsp_tcp")?.toBoolean() ?: true
     /** True for a camera the user created in the app with a direct URL (bypasses HA's HLS). */
     val isLocalCamera: Boolean get() = localStreamUrl != null
 
