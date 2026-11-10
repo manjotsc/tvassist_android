@@ -32,4 +32,12 @@ data class LocalCamera(
      * instead of live video (see CameraSource.UNAVAILABLE).
      */
     val lowResUrl: String = "",
+    /**
+     * Carry an `rtsp://` stream's RTP over the RTSP connection itself (TCP) rather than UDP. On by
+     * default, which is also what every camera got before this was a setting: go2rtc — Frigate's
+     * restreamer — refuses UDP outright with `461 Unsupported Transport`, and Media3 asks for UDP
+     * first (issue #3). Off is for the odd camera that only speaks UDP. Applies to both players;
+     * ignored for anything that is not RTSP.
+     */
+    val rtspTcp: Boolean = true,
 )
