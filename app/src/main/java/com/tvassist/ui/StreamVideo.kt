@@ -26,6 +26,7 @@ import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.hls.HlsMediaSource
+import androidx.media3.exoplayer.rtsp.RtspMediaSource
 import com.tvassist.ui.cards.camera.HardwareDecoder
 import com.tvassist.ui.cards.camera.grabFramesInto
 import com.tvassist.ui.cards.camera.tooLargeForSoftware
@@ -94,15 +95,18 @@ fun StreamVideo(
     // app holds the hardware decoder (see VlcVideo). The caller explains; without one the picture
     // simply stops, which is still far better than the frozen TV it replaces.
     onTooLargeForSoftware: (() -> Unit)? = null,
+    // RTP over TCP for rtsp:// (see LocalCamera.rtspTcp). Only a local camera can turn it off;
+    // notification streams have no per-camera setting and keep the default.
+    rtspTcp: Boolean = true,
 ) {
     val useVlc = player.equals("vlc", true) ||
         (player.equals("auto", true) && url.startsWith("rtsp", ignoreCase = true))
     if (useVlc) {
-        VlcVideo(url, modifier, captureKey, reloadOnEnd, nextUrl, onTooLargeForSoftware)
+        VlcVideo(url, modifier, captureKey, reloadOnEnd, nextUrl, onTooLargeForSoftware, rtspTcp)
     } else {
         // No guard needed here: ExoPlayer's decoder fallback is off by default, so a refused
         // hardware decoder is a playback error, not a slide into software decoding.
-        ExoVideo(url, modifier, captureKey)
+        ExoVideo(url, modifier, captureKey, rtspTcp)
     }
 }
 
@@ -152,9 +156,30 @@ private class StreamTally {
     }
 }
 
+/**
+ * Loads [url] into this player, forcing RTP over TCP for `rtsp://` unless [rtspTcp] is false.
+ *
+ * Media3's RTSP source asks for UDP first and falls back to TCP only after UDP data fails to
+ * arrive. A server that refuses UDP outright — go2rtc, and so every Frigate restream, answers
+ * `461 Unsupported Transport` — ends playback on that first SETUP, and the fallback never runs
+ * (issue #3). TCP is also what the VLC path asks for (`--rtsp-tcp`), so the two engines now reach
+ * the same cameras the same way. Everything else goes through the default factory unchanged.
+ *
+ * With [rtspTcp] off this is Media3's own behaviour: UDP first, TCP if no UDP data arrives.
+ */
+@OptIn(UnstableApi::class)
+internal fun ExoPlayer.setStreamUrl(url: String, rtspTcp: Boolean = true) {
+    val item = MediaItem.fromUri(url)
+    if (rtspTcp && url.startsWith("rtsp", ignoreCase = true)) {
+        setMediaSource(RtspMediaSource.Factory().setForceUseRtpTcp(true).createMediaSource(item))
+    } else {
+        setMediaItem(item)
+    }
+}
+
 @OptIn(UnstableApi::class)
 @Composable
-private fun ExoVideo(url: String, modifier: Modifier, captureKey: String?) {
+private fun ExoVideo(url: String, modifier: Modifier, captureKey: String?, rtspTcp: Boolean) {
     val context = LocalContext.current
     var textureView by remember { mutableStateOf<TextureView?>(null) }
     val settled = remember(url) { AtomicBoolean(false) }
@@ -173,7 +198,7 @@ private fun ExoVideo(url: String, modifier: Modifier, captureKey: String?) {
                     .createMediaSource(MediaItem.fromUri(url))
                 setMediaSource(source)
             } else {
-                setMediaItem(MediaItem.fromUri(url))
+                setStreamUrl(url, rtspTcp)
             }
             repeatMode = Player.REPEAT_MODE_ALL
             volume = 0f
@@ -246,6 +271,7 @@ private fun VlcVideo(
     reloadOnEnd: Boolean = false,
     nextUrl: (() -> String?)? = null,
     onTooLargeForSoftware: (() -> Unit)? = null,
+    rtspTcp: Boolean = true,
 ) {
     val context = LocalContext.current
     val main = remember { android.os.Handler(android.os.Looper.getMainLooper()) }
@@ -278,6 +304,9 @@ private fun VlcVideo(
         addOption(":realrtsp-caching=300")
         addOption(":clock-jitter=0")
         addOption(":clock-synchro=0")
+        // The shared LibVLC instance is built with --rtsp-tcp; a per-media option overrides it, so
+        // a UDP-only camera opts out here without changing every other camera.
+        if (!rtspTcp) addOption(":no-rtsp-tcp")
     }
     val player = remember(url) {
         VlcMediaPlayer(libVlc).apply {
