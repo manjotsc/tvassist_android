@@ -51,7 +51,10 @@ import com.tvassist.ui.openOverlaySettings
  */
 @OptIn(ExperimentalTvMaterial3Api::class)
 @Composable
-internal fun HealthWarnings() {
+internal fun HealthWarnings(
+    /** Why a token or key could not be stored securely (ConnectionViewModel.secretSaveError), or null. */
+    secretSaveError: String? = null,
+) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     var hasOverlay by remember { mutableStateOf(Settings.canDrawOverlays(context)) }
@@ -82,7 +85,7 @@ internal fun HealthWarnings() {
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
-    if (hasOverlay && hasKeyCapture && !micNeeded) return
+    if (hasOverlay && hasKeyCapture && !micNeeded && secretSaveError == null) return
 
     Column(
         modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp))
@@ -108,6 +111,10 @@ internal fun HealthWarnings() {
                 "Your trigger button won't open the overlay. Android turns this off after each app update.",
             ) { openAccessibilitySettings(context) }
         }
+        if (secretSaveError != null) {
+            // No Fix button: nothing in Settings repairs the Keystore. The detail says what will.
+            WarningLine("Couldn't save securely", secretSaveError, onFix = null)
+        }
         if (micNeeded) {
             WarningLine(
                 "Microphone access is off",
@@ -120,13 +127,15 @@ internal fun HealthWarnings() {
 
 @OptIn(ExperimentalTvMaterial3Api::class)
 @Composable
-internal fun WarningLine(title: String, detail: String, onFix: () -> Unit) {
+internal fun WarningLine(title: String, detail: String, onFix: (() -> Unit)?) {
     Row(verticalAlignment = Alignment.CenterVertically) {
         Column(Modifier.weight(1f)) {
             Text(title, color = Color(0xFFFFE0E0), fontSize = 14.sp, fontWeight = FontWeight.Medium)
             Text(detail, color = TxtMuted, fontSize = 12.sp)
         }
-        Spacer(Modifier.width(12.dp))
-        ChipButton("Fix", selected = false, onClick = onFix)
+        if (onFix != null) {
+            Spacer(Modifier.width(12.dp))
+            ChipButton("Fix", selected = false, onClick = onFix)
+        }
     }
 }
