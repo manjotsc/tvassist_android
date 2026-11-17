@@ -180,12 +180,12 @@ data class OverlayTile(
         const val P_LIVE = "live"        // nudge HA every ~15s for a fresh fix
         const val P_TRAIL = "trail"      // fading breadcrumb trail of recent positions
 
-        // Per-tile map source. AUTO follows the global setting (Google if a key is set, else OSM);
-        // OSM / GOOGLE force that source (GOOGLE needs a key, else falls back to OSM).
+        // Per-tile map source. AUTO follows Settings → Maps; the others force that map (see
+        // [MapSource.resolve] — GOOGLE needs a key, else falls back to OSM).
         const val MAP_AUTO = "auto"
-        const val MAP_OSM = "osm"
-        const val MAP_GOOGLE = "google"
-        val MAP_PROVIDERS = listOf(MAP_AUTO to "Auto", MAP_OSM to "OpenStreetMap", MAP_GOOGLE to "Google")
+        const val MAP_OSM = MapSource.OSM
+        const val MAP_GOOGLE = MapSource.GOOGLE
+        val MAP_PROVIDERS = listOf(MAP_AUTO to "Auto") + MapSource.CHOICES
 
         /** Default person-map options applied to a new person tile. */
         val PERSON_DEFAULTS = listOf(P_ZONE, P_BATTERY, P_SPEED, P_UPDATED, P_LIVE)
