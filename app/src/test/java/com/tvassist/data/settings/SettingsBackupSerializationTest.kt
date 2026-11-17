@@ -17,6 +17,11 @@ class SettingsBackupSerializationTest {
             announceRepeatGap = 5,
             interactiveEnlargeTimeout = 120,
             notificationDefaultDuration = 12,
+            mapProvider = "google",
+            mapOsmDark = false,
+            mapStyle = "dark",
+            collectLogs = false,
+            persistLogs = true,
         )
         val encoded = json.encodeToString(SettingsBackup.serializer(), original)
         val decoded = json.decodeFromString(SettingsBackup.serializer(), encoded)
@@ -29,5 +34,12 @@ class SettingsBackupSerializationTest {
         assertEquals("once", decoded.announceSoundRepeat)
         assertEquals("both", decoded.announceSpeakMode)
         assertEquals(0, decoded.interactiveEnlargeTimeout)
+        // Maps: no choice yet (keep the old Google-if-keyed rule), OpenStreetMap dark, Google roadmap.
+        assertEquals("", decoded.mapProvider)
+        assertEquals(true, decoded.mapOsmDark)
+        assertEquals("roadmap", decoded.mapStyle)
+        // Logs: collected by default, in memory only.
+        assertEquals(true, decoded.collectLogs)
+        assertEquals(false, decoded.persistLogs)
     }
 }

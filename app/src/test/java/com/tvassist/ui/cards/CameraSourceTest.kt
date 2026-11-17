@@ -1,7 +1,9 @@
 package com.tvassist.ui.cards
 
 import com.tvassist.ui.cards.camera.CameraSource
+import com.tvassist.ui.cards.camera.afterDecoderFailure
 import com.tvassist.ui.cards.camera.chooseCameraSource
+import com.tvassist.ui.cards.camera.isDecoderError
 import com.tvassist.ui.cards.camera.tooLargeForSoftware
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -51,5 +53,28 @@ class CameraSourceTest {
         // libVLC reports 0x0 until it has parsed the stream; the guard keeps looking instead.
         assertFalse(tooLargeForSoftware(0, 0))
         assertFalse(tooLargeForSoftware(3840, 0))
+    }
+
+    // ---- After the stream started (issue #3's follow-up) ----
+    // A MediaTek TV let the decoder be *created* beside Netflix's 4K, then failed a 1600x1200 decode
+    // moments later; a 640x480 played fine alongside. The busy check cannot see that coming.
+
+    @Test fun aMainStreamWhoseDecoderFailsStepsDownToTheSmallStream() {
+        assertEquals(CameraSource.LOW_RES, afterDecoderFailure(playingLowRes = false, hasLowRes = true))
+    }
+
+    @Test fun withNothingSmallerLeftItFallsBackToSnapshots() {
+        assertEquals(CameraSource.UNAVAILABLE, afterDecoderFailure(playingLowRes = false, hasLowRes = false))
+        // The small stream failing too never climbs back up: that decoder just refused once already.
+        assertEquals(CameraSource.UNAVAILABLE, afterDecoderFailure(playingLowRes = true, hasLowRes = true))
+    }
+
+    @Test fun onlyMedia3sDecodingErrorsCountAsTheDecoders() {
+        assertTrue(isDecoderError(4001)) // ERROR_CODE_DECODER_INIT_FAILED
+        assertTrue(isDecoderError(4003)) // ERROR_CODE_DECODING_FAILED — what MediaCodec error 12 surfaces as
+        assertTrue(isDecoderError(4005)) // ERROR_CODE_DECODING_FORMAT_UNSUPPORTED
+        assertFalse(isDecoderError(2001)) // network connection failed: retrying the stream is right
+        assertFalse(isDecoderError(2004)) // HTTP status (Cloudflare's 403)
+        assertFalse(isDecoderError(3001)) // malformed container
     }
 }

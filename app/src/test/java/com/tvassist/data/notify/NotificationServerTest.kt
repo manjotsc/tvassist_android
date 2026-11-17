@@ -22,6 +22,17 @@ class NotificationServerTest {
 
     // ---- field parsing / aliases ----
 
+    /** Issue #3: a pushed rtsp:// stream keeps TCP (go2rtc refuses UDP) unless the push asks for udp. */
+    @Test fun `rtsp_transport defaults to tcp and only an explicit udp turns it off`() {
+        val url = "rtsp://cam/x"
+        assertEquals(true, server().fieldsToNotification(mapOf("message" to "x", "media_url" to url))!!.rtspTcp)
+        assertEquals(true, server().fieldsToNotification(mapOf("message" to "x", "rtsp_transport" to "tcp"))!!.rtspTcp)
+        assertEquals(false, server().fieldsToNotification(mapOf("message" to "x", "rtsp_transport" to "udp"))!!.rtspTcp)
+        assertEquals(false, server().fieldsToNotification(mapOf("message" to "x", "rtspTransport" to "UDP"))!!.rtspTcp)
+        // A typo is not a request for UDP.
+        assertEquals(true, server().fieldsToNotification(mapOf("message" to "x", "rtsp_transport" to "udpp"))!!.rtspTcp)
+    }
+
     @Test fun `border_color alias maps to borderColor`() {
         val n = server().fieldsToNotification(mapOf("message" to "hi", "border_color" to "#F00"))
         assertNotNull(n)
