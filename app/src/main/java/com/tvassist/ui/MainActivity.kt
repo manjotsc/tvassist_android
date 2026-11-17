@@ -76,6 +76,7 @@ import com.tvassist.ui.settings.BackupPage
 import com.tvassist.ui.settings.CamerasPage
 import com.tvassist.ui.settings.ConnectionPage
 import com.tvassist.ui.settings.DisplayPage
+import com.tvassist.ui.settings.LogsPage
 import com.tvassist.ui.settings.MapsPage
 import com.tvassist.ui.settings.NotificationsPage
 import com.tvassist.ui.settings.PermissionsPage
@@ -326,6 +327,7 @@ private fun AppScreen(
                     Route.Maps -> MapsPage(viewModel) { route = Route.SettingsHub }
                     Route.Audio -> AudioPage(viewModel) { route = Route.SettingsHub }
                     Route.Security -> SecurityPage(viewModel) { route = Route.SettingsHub }
+                    Route.Logs -> LogsPage(viewModel) { route = Route.SettingsHub }
                     Route.About -> AboutPage { route = Route.SettingsHub }
                 }
             }
@@ -405,7 +407,7 @@ internal enum class Route(val section: Section) {
     Triggers(Section.Settings), Appearance(Section.Settings), Backup(Section.Settings),
     About(Section.Settings), Notifications(Section.Settings),
     Display(Section.Settings), Cameras(Section.Settings), Maps(Section.Settings),
-    Audio(Section.Settings), Security(Section.Settings),
+    Audio(Section.Settings), Security(Section.Settings), Logs(Section.Settings),
 }
 
 /** Where hardware BACK goes from [route]; null means exit the app (Home root). */
