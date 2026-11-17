@@ -1,0 +1,25 @@
+name: Set up the Android build
+description: >
+  JDK 17, Gradle with its cache, and an executable gradlew. Every Gradle job in android.yml starts
+  with this, so the setup lives in one place. Expects the repository to be checked out already.
+
+runs:
+  using: composite
+  steps:
+    - name: Set up JDK 17
+      uses: actions/setup-java@v4
+      with:
+        java-version: '17'
+        distribution: 'temurin'
+
+    # Writes the cache only from main (the action's default); PR jobs read what main left behind,
+    # and the "Prepare Gradle" job fills it before the parallel jobs start.
+    - name: Set up Gradle
+      uses: gradle/actions/setup-gradle@v4
+
+    # gradlew is committed as mode 100644 because the repo is authored on Windows, where
+    # core.fileMode is false and git never records the executable bit. Linux runners then fail
+    # with "Permission denied" (exit 126). Harmless once the bit is fixed in git.
+    - name: Make gradlew executable
+      shell: bash
+      run: chmod +x gradlew

@@ -102,6 +102,9 @@ android {
     }
 
     lint {
+        // Also as SARIF, which CI uploads so GitHub shows findings on the changed lines of a PR
+        // (.github/workflows/android.yml). The HTML report is unchanged.
+        sarifReport = true
         // Acknowledged pre-existing/deliberate/third-party findings, so lint stays green. Each is a
         // conscious choice, not an oversight:
         disable += setOf(
@@ -172,4 +175,14 @@ dependencies {
     // Unit tests (pure-JVM: field parsing, serialization round-trips, notification-store timing).
     testImplementation(libs.junit)
     testImplementation(libs.kotlinx.coroutines.test)
+}
+
+// CI runs the unit tests as a matrix, one job per area (.github/workflows/android.yml), so a failure
+// reads "Unit tests (maps)" rather than "build". Each job passes comma-separated class patterns as
+// -PtestInclude / -PtestExclude; without them — every local run — this does nothing.
+tasks.withType<Test>().configureEach {
+    providers.gradleProperty("testInclude").orNull?.split(',')?.map(String::trim)?.filter(String::isNotEmpty)
+        ?.forEach { filter.includeTestsMatching(it) }
+    providers.gradleProperty("testExclude").orNull?.split(',')?.map(String::trim)?.filter(String::isNotEmpty)
+        ?.forEach { filter.excludeTestsMatching(it) }
 }

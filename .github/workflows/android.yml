@@ -1,8 +1,18 @@
 name: Android CI
 
-# Debug build only: release signing needs local.properties + tv-assist-release.jks, which are
-# git-ignored and stay on the dev machine. CI proves the code compiles, tests pass and lint is
-# clean — it deliberately does not try to produce a shippable APK.
+# Laid out as a graph rather than one job, so the run page says *what* failed — "Unit tests (maps)",
+# "Android lint" — instead of a single red "build":
+#
+#                          ┌─ Validate Gradle wrapper
+#   Collect info & changes ┼─ Lint workflow files
+#                          └─ Prepare Gradle ─┬─ Compile (debug)
+#                                             ├─ Android lint
+#                                             ├─ Unit tests (matrix, one job per area) ── Test report
+#                                             └─ Release build (R8, unsigned)
+#
+# Release signing needs local.properties + tv-assist-release.jks, which are git-ignored and stay on
+# the dev machine, so the release job proves R8 and resource shrinking work; it does not produce a
+# shippable APK.
 on:
   push:
     branches: [main]
@@ -10,44 +20,217 @@ on:
     branches: [main]
   workflow_dispatch:
 
-jobs:
-  build:
-    runs-on: ubuntu-latest
+# A newer push to the same branch or PR makes the older run pointless.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
+permissions:
+  contents: read
+
+jobs:
+  info:
+    name: Collect info & changes
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.changes.outputs.code }}
+      workflows: ${{ steps.changes.outputs.workflows }}
     steps:
       - uses: actions/checkout@v4
-
-      - name: Set up JDK 17
-        uses: actions/setup-java@v4
         with:
-          java-version: '17'
-          distribution: 'temurin'
+          fetch-depth: 0
 
-      - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4
+      # What changed decides what runs: a README-only push skips the whole build (shown as skipped
+      # on the graph). A manual run, a new branch, or anything we cannot diff runs everything.
+      - name: Detect changes
+        id: changes
+        shell: bash
+        env:
+          EVENT: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+        run: |
+          all() { echo "code=true" >> "$GITHUB_OUTPUT"; echo "workflows=true" >> "$GITHUB_OUTPUT"; echo "Running everything: $1"; exit 0; }
+          case "$EVENT" in
+            pull_request) base="$PR_BASE" ;;
+            push) base="$PUSH_BEFORE" ;;
+            *) all "manual run" ;;
+          esac
+          if [ -z "$base" ] || [ "$base" = "0000000000000000000000000000000000000000" ] || ! git cat-file -e "$base^{commit}" 2>/dev/null; then
+            all "no base commit to compare with"
+          fi
+          changed=$(git diff --name-only "$base" HEAD)
+          echo "Changed files:"; echo "$changed" | sed 's/^/  /'
+          # The build: app sources and resources, Gradle files, and CI itself (a workflow change
+          # must prove it still builds).
+          if echo "$changed" | grep -qE '^(app/|gradle/|build\.gradle\.kts$|settings\.gradle\.kts$|gradle\.properties$|gradlew|\.github/)'; then
+            echo "code=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "code=false" >> "$GITHUB_OUTPUT"
+          fi
+          if echo "$changed" | grep -qE '^\.github/'; then
+            echo "workflows=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "workflows=false" >> "$GITHUB_OUTPUT"
+          fi
 
-      # gradlew is committed as mode 100644 because the repo is authored on Windows, where
-      # core.fileMode is false and git never records the executable bit. Linux runners then fail
-      # with "Permission denied" (exit 126). Harmless once the bit is fixed in git.
-      - name: Make gradlew executable
-        run: chmod +x gradlew
+  wrapper:
+    name: Validate Gradle wrapper
+    needs: info
+    if: needs.info.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Checks gradle-wrapper.jar against Gradle's published checksums: a tampered wrapper would
+      # run arbitrary code in every build.
+      - uses: gradle/actions/wrapper-validation@v4
 
-      - name: Compile
-        run: ./gradlew :app:assembleDebug --no-daemon
+  actionlint:
+    name: Lint workflow files
+    needs: info
+    if: needs.info.outputs.workflows == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Pinned image rather than a script fetched from a branch: the same actionlint every run.
+      - name: actionlint
+        run: docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.7 -color
 
-      - name: Unit tests
-        run: ./gradlew :app:testDebugUnitTest --no-daemon
+  prepare:
+    name: Prepare Gradle
+    needs: info
+    if: needs.info.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-gradle-build
+      # Resolve everything the jobs below will need, once, so they start from a warm cache
+      # instead of each downloading the same dependencies in parallel.
+      - name: Download dependencies
+        run: >
+          ./gradlew --no-daemon -q
+          :app:dependencies --configuration debugRuntimeClasspath
+          :app:dependencies --configuration releaseRuntimeClasspath
+          :app:dependencies --configuration debugUnitTestRuntimeClasspath
 
-      - name: Lint
-        run: ./gradlew :app:lintDebug --no-daemon
+  compile:
+    name: Compile (debug)
+    needs: prepare
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-gradle-build
+      - name: assembleDebug
+        run: ./gradlew --no-daemon :app:assembleDebug
 
-      # Kept even when earlier steps fail — a red build is exactly when the reports are wanted.
-      - name: Upload reports
-        if: always()
+  lint:
+    name: Android lint
+    needs: prepare
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # To show lint findings on the code (GitHub code scanning).
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-gradle-build
+      - name: lintDebug
+        run: ./gradlew --no-daemon :app:lintDebug
+      # Errors only: lint's warnings are acknowledged noise (see the script) and would bury the
+      # Security tab. The full report, warnings included, is still the artifact below.
+      - name: Keep lint errors only
+        if: ${{ !cancelled() && hashFiles('app/build/reports/lint-results-debug.sarif') != '' }}
+        run: >
+          python3 .github/scripts/sarif_errors_only.py
+          app/build/reports/lint-results-debug.sarif app/build/reports/lint-errors.sarif
+      # Annotations on the changed lines of a PR. A fork's PR gets no write token, so this may be
+      # refused there — the lint result itself (the step above) is what passes or fails the job.
+      - name: Show errors on the code
+        if: ${{ !cancelled() && hashFiles('app/build/reports/lint-errors.sarif') != '' }}
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: app/build/reports/lint-errors.sarif
+          category: android-lint
+      - name: Upload lint report
+        if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v4
         with:
-          name: reports
-          path: |
-            app/build/reports/tests/
-            app/build/reports/lint-results-debug.html
+          name: lint-report
+          path: app/build/reports/lint-results-debug.html
           if-no-files-found: ignore
+
+  unit-tests:
+    name: Unit tests (${{ matrix.area }})
+    needs: prepare
+    runs-on: ubuntu-latest
+    strategy:
+      # Every area reports, even when one fails — the point is seeing which.
+      fail-fast: false
+      matrix:
+        include:
+          - area: cards
+            include: 'com.tvassist.ui.cards.*'
+          - area: maps
+            include: 'com.tvassist.ui.maps.*'
+          - area: settings
+            include: 'com.tvassist.data.settings.*'
+          - area: logs
+            include: 'com.tvassist.data.logs.*'
+          - area: notify
+            include: 'com.tvassist.data.notify.*'
+          # Everything not claimed above (ha, assist, web, update, ui), so a new test package can
+          # never fall between the areas and silently stop running.
+          - area: other
+            exclude: 'com.tvassist.ui.cards.*,com.tvassist.ui.maps.*,com.tvassist.data.settings.*,com.tvassist.data.logs.*,com.tvassist.data.notify.*'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-gradle-build
+      - name: testDebugUnitTest
+        env:
+          TEST_INCLUDE: ${{ matrix.include }}
+          TEST_EXCLUDE: ${{ matrix.exclude }}
+        run: >
+          ./gradlew --no-daemon :app:testDebugUnitTest
+          "-PtestInclude=${TEST_INCLUDE}" "-PtestExclude=${TEST_EXCLUDE}"
+      - name: Upload test results
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-${{ matrix.area }}
+          path: app/build/test-results/testDebugUnitTest/*.xml
+          if-no-files-found: ignore
+      - name: Upload test report
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-report-${{ matrix.area }}
+          path: app/build/reports/tests/testDebugUnitTest/
+          if-no-files-found: ignore
+
+  report:
+    name: Test report
+    needs: unit-tests
+    if: ${{ !cancelled() && needs.unit-tests.result != 'skipped' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: test-results-*
+          path: results
+      # One table for the whole matrix on the run's summary page, plus an annotation per failure.
+      - name: Summarise
+        run: python3 .github/scripts/test_report.py results
+
+  release:
+    name: Release build (R8, unsigned)
+    needs: prepare
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-gradle-build
+      # R8 shrinking and obfuscation only happen here. Release-only breakage — a missing keep rule,
+      # a class R8 renamed that something looks up by name — passes every other job.
+      - name: assembleRelease
+        run: ./gradlew --no-daemon :app:assembleRelease

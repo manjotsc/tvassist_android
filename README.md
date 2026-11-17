@@ -169,7 +169,7 @@ Home Assistant cameras work as they are. For the direct route, add a camera unde
 | Stream URL | The main stream, e.g. `rtsp://user:pass@192.168.1.20:554/stream1` |
 | **Low-res stream URL** | Optional. The camera's smaller stream, often the same address ending in `/stream2`. |
 | Snapshot URL | Optional. A still image for the tile, and for the popup when live video isn't possible. |
-| Player | Auto (ExoPlayer, or VLC for RTSP), ExoPlayer, or VLC. |
+| Player | **Default** (follows *Default player* in Settings → Cameras), Auto, ExoPlayer, or VLC. Auto plays on ExoPlayer and switches to VLC for a stream ExoPlayer can't play, or while another app holds the TV's video decoder. |
 | Keep refreshing | For cameras that serve a short looped video rather than a stream. The clip is fetched every 30 s and looped on the TV. |
 
 > [!IMPORTANT]
@@ -242,6 +242,8 @@ plays even when another app holds the TV's decoder; see [Cameras](#cameras).
 | `camera` | An HA camera entity, shown as a snapshot |
 | `camera_stream` | An HA camera entity, played live through Home Assistant (prefer `media_url`) |
 | `media_url`, `media_type` | A stream or video URL, played directly; for a video file set `media_type: video` |
+| `player` | `auto` (default: ExoPlayer, VLC if it can't play the stream or the decoder is busy), `exoplayer` or `vlc` |
+| `rtsp_transport` | For an `rtsp://` `media_url`: `tcp` (default; go2rtc and Frigate need it) or `udp` for a camera that only streams over UDP |
 | `duration` | Seconds on screen |
 | `position` | `top-right` (default), `top-left`, `top-center`, `bottom-left`, `bottom-center`, `bottom-right` |
 | `size` | `small`, `medium` (default) or `large` |
@@ -285,6 +287,7 @@ the notification token, encrypted with a passphrase you choose.
 | Cameras | Direct cameras and their low-res streams |
 | Maps | Map cards and the Google Maps source |
 | Backup & restore | Save and restore settings |
+| Logs | Collect a log to attach to an issue report |
 | About | Version and update check |
 
 </details>
@@ -297,6 +300,19 @@ the notification token, encrypted with a passphrase you choose.
 | Connected, but pictures and cameras don't load | Include `http://` or `https://` in the Home Assistant URL. |
 | A camera shows only a still, or is choppy, while another video app is open | Add a low-res stream for it; see [Cameras](#cameras). |
 | The sidebar feels sluggish | Look at what's behind it. Animated launchers cost far more than video does. |
+
+### Reporting a problem
+
+A log makes most problems fixable. In **Settings → Logs**:
+
+1. For camera or notification video, turn on **Detailed logging** (it turns itself off after 24 hours).
+2. Reproduce the problem.
+3. Straight away, either press **Save to Downloads**, or turn on **Web setup** and use
+   **Logs → Download log** from a phone or computer.
+
+Attach the file to your [issue](https://github.com/manjotsc/tvassist_android/issues). Tokens, passwords
+and the addresses of your Home Assistant and cameras are replaced with placeholders, and the file
+starts with a description of the TV and its video decoders. Read it through before posting anyway.
 
 ## Known issues
 
@@ -317,7 +333,9 @@ the notification token, encrypted with a passphrase you choose.
 - **Certificate checking** can be relaxed only for a Home Assistant on your private network, and
   never for anything else.
 - **Logs never contain credentials.** Camera URLs are logged with `user:password@` removed, and
-  the video player's own logging is switched off in release builds.
+  the video player's own logging is switched off in release builds. A log saved from
+  **Settings → Logs** also replaces your Home Assistant and camera addresses with placeholders, and
+  stays on the TV unless you save or download it.
 - **The phone setup page** is protected by HTTPS and a PIN shown on the TV.
 
 ## Development
