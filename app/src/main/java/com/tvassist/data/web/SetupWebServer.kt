@@ -36,6 +36,10 @@ class SetupWebServer(
     private val exportBackup: (includeSecrets: Boolean, passphrase: String) -> String,
     private val restoreBackup: (text: String, passphrase: String) -> Boolean,
     private val backupFileName: () -> String,
+    // Logs: the full exported report (device header + collected log, already redacted) and its file
+    // name. Blocking is fine, as for backups.
+    private val logReport: () -> String,
+    private val logFileName: () -> String,
     private val onStop: () -> Unit,
 ) : TinyHttpServer(port, "SetupServer", sslContext) {
 
@@ -85,6 +89,8 @@ class SetupWebServer(
             req.path == "/backup" -> html(page("Backup", backupForm()))
             req.path == "/restore" && req.method == "POST" -> restore(req)
             req.path == "/restore" -> html(page("Restore", restoreForm(null)))
+            req.path == "/logs/download" -> downloadLogs()
+            req.path == "/logs" -> html(page("Logs", logsBody()))
             else -> notFound()
         }
     }
@@ -122,7 +128,7 @@ class SetupWebServer(
                     id = f["id"]?.takeIf { it.isNotBlank() } ?: ("cam_" + System.currentTimeMillis().toString(36)),
                     name = name, streamUrl = streamUrl,
                     snapshotUrl = f["snapshotUrl"]?.trim().orEmpty(),
-                    player = f["player"]?.trim()?.takeIf { it.isNotBlank() } ?: "auto",
+                    player = f["player"]?.trim()?.takeIf { it.isNotBlank() } ?: LocalCamera.PLAYER_DEFAULT,
                     refresh = f["refresh"] != null,
                     lowResUrl = f["lowResUrl"]?.trim().orEmpty(),
                     // An unticked checkbox is simply absent from the form, so absent means UDP. The
@@ -223,8 +229,28 @@ class SetupWebServer(
         <a class="card" href="/notifications"><b>Notifications</b><span>Push server address &amp; token</span></a>
         <a class="card" href="/maps"><b>Maps</b><span>Google Maps API key</span></a>
         <a class="card" href="/backup"><b>Backup &amp; restore</b><span>Download or upload this TV's settings</span></a>
+        <a class="card" href="/logs"><b>Logs</b><span>Download a log to attach to an issue report</span></a>
         """,
         home = false,
+    )
+
+    // ---- logs ----
+
+    private fun logsBody(): String = """
+        <p>A text file of what TV Assist logged, with a header describing this TV and its video
+        decoders. Tokens, passwords and the addresses of your Home Assistant and cameras are replaced
+        with placeholders, but read it through before posting it anywhere public.</p>
+        <p>To capture a problem: reproduce it on the TV, then download straight away. For camera or
+        notification video, turn on <b>Detailed logging</b> on the TV first (Settings → Logs).</p>
+        <form method="get" action="/logs/download"><button type="submit" style="width:100%">Download log</button></form>
+    """
+
+    /** GET /logs/download → the report as a text attachment. */
+    private fun downloadLogs(): HttpResponse = HttpResponse(
+        body = logReport(),
+        status = 200,
+        contentType = "text/plain; charset=utf-8",
+        extraHeaders = listOf("Content-Disposition" to "attachment; filename=\"${logFileName()}\""),
     )
 
     // ---- backup / restore ----
@@ -382,7 +408,7 @@ class SetupWebServer(
             """
         }
         fun opt(v: String, label: String) =
-            """<option value="$v"${if ((editing?.player ?: "auto") == v) " selected" else ""}>$label</option>"""
+            """<option value="$v"${if ((editing?.player ?: LocalCamera.PLAYER_DEFAULT) == v) " selected" else ""}>$label</option>"""
         return page(
             "Cameras",
             """
@@ -408,7 +434,8 @@ class SetupWebServer(
                   placeholder="http://192.168.1.20/snapshot.jpg" value="${escape(editing?.snapshotUrl ?: "")}">
                 <label>Player</label>
                 <select name="player">
-                  ${opt("auto", "Auto (ExoPlayer; VLC for RTSP)")}
+                  ${opt(LocalCamera.PLAYER_DEFAULT, "Default (the TV's player setting)")}
+                  ${opt("auto", "Auto (ExoPlayer; VLC if it can't play it or the decoder is busy)")}
                   ${opt("exoplayer", "ExoPlayer")}
                   ${opt("vlc", "VLC")}
                 </select>
