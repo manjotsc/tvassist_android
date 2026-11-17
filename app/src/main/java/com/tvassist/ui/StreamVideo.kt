@@ -1,5 +1,6 @@
 package com.tvassist.ui
 
+import com.tvassist.data.logs.DiagLog
 import android.content.Context
 import android.graphics.SurfaceTexture
 import android.net.Uri
@@ -27,7 +28,12 @@ import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.hls.HlsMediaSource
 import androidx.media3.exoplayer.rtsp.RtspMediaSource
+import com.tvassist.ui.cards.camera.DebugFaults
 import com.tvassist.ui.cards.camera.HardwareDecoder
+import com.tvassist.ui.cards.camera.isDecoderError
+import com.tvassist.ui.cards.camera.vlcAfterExoFailure
+import com.tvassist.ui.cards.camera.firstEngine
+import com.tvassist.ui.cards.camera.VideoEngine
 import com.tvassist.ui.cards.camera.grabFramesInto
 import com.tvassist.ui.cards.camera.tooLargeForSoftware
 import com.tvassist.data.ha.safeUrlForLog
@@ -61,7 +67,20 @@ private const val CAMERA_TAG = "HaCamera"
  * event thread and the composition's dispose both race for it.
  */
 private fun reportStreamOutcome(settled: AtomicBoolean, engine: String, url: String, openedAt: Long, reason: String?) {
-    if (!settled.compareAndSet(false, true)) return
+    if (!settled.compareAndSet(false, true)) {
+        // Already settled, i.e. it showed a picture. An engine error now is the stream dying while
+        // it played — a decoder giving out after it started is exactly this (issue #3's follow-up),
+        // and the once-only rule above used to swallow it whole. Teardown passes no reason: nothing to add.
+        if (reason != null) {
+            val secs = (SystemClock.elapsedRealtime() - openedAt) / 1000.0
+            android.util.Log.w(
+                CAMERA_TAG,
+                "stream stopped after playing ($engine): ${safeUrlForLog(url)} — $reason " +
+                    "(${"%.1f".format(secs)}s in)",
+            )
+        }
+        return
+    }
     val secs = (SystemClock.elapsedRealtime() - openedAt) / 1000.0
     android.util.Log.w(
         CAMERA_TAG,
@@ -95,18 +114,43 @@ fun StreamVideo(
     // app holds the hardware decoder (see VlcVideo). The caller explains; without one the picture
     // simply stops, which is still far better than the frozen TV it replaces.
     onTooLargeForSoftware: (() -> Unit)? = null,
-    // RTP over TCP for rtsp:// (see LocalCamera.rtspTcp). Only a local camera can turn it off;
-    // notification streams have no per-camera setting and keep the default.
+    // RTP over TCP for rtsp:// (see LocalCamera.rtspTcp). A direct camera sets it per camera, a
+    // notification per push (`rtsp_transport`); everything else keeps the default.
     rtspTcp: Boolean = true,
+    // Called on the main thread when the stream failed and the engine is not retrying it itself, so
+    // the caller can show something in its place. Without it a dead stream left its area empty —
+    // and in a notification card, which has no background of its own, see-through (issue #3).
+    onFailed: (() -> Unit)? = null,
+    // Which surface this is, for detailed logging only (DiagLog): "notification card n1",
+    // "enlarged notification n1". Issue #4 turned on the *order* of two surfaces' players.
+    diagLabel: String = "stream",
 ) {
-    val useVlc = player.equals("vlc", true) ||
-        (player.equals("auto", true) && url.startsWith("rtsp", ignoreCase = true))
-    if (useVlc) {
-        VlcVideo(url, modifier, captureKey, reloadOnEnd, nextUrl, onTooLargeForSoftware, rtspTcp)
+    // Auto needs to know whether the hardware decoder is free before it can choose (firstEngine);
+    // an explicit player does not ask. Tens of milliseconds, behind whatever poster is showing.
+    val auto = player.equals("auto", ignoreCase = true)
+    var decoderBusy by remember(url) { mutableStateOf<Boolean?>(if (auto) null else false) }
+    if (auto) {
+        LaunchedEffect(url) {
+            decoderBusy = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { HardwareDecoder.isBusy() }
+        }
+    }
+    // Set when ExoPlayer failed under Auto: the stream gets a second chance in VLC.
+    var exoGaveUp by remember(url) { mutableStateOf(false) }
+    val busy = decoderBusy ?: return
+    val engine = if (exoGaveUp) VideoEngine.VLC else firstEngine(player, busy)
+    if (engine == VideoEngine.VLC) {
+        VlcVideo(url, modifier, captureKey, reloadOnEnd, nextUrl, onTooLargeForSoftware, rtspTcp, onFailed, diagLabel)
     } else {
         // No guard needed here: ExoPlayer's decoder fallback is off by default, so a refused
         // hardware decoder is a playback error, not a slide into software decoding.
-        ExoVideo(url, modifier, captureKey, rtspTcp)
+        ExoVideo(url, modifier, captureKey, rtspTcp, diagLabel = diagLabel, onFailed = { decoderError ->
+            if (vlcAfterExoFailure(player, decoderError, hasDecoderLadder = false)) {
+                DiagLog.i(CAMERA_TAG, "$diagLabel: exoplayer could not play it, trying vlc (auto)")
+                exoGaveUp = true
+            } else {
+                onFailed?.invoke()
+            }
+        })
     }
 }
 
@@ -179,7 +223,15 @@ internal fun ExoPlayer.setStreamUrl(url: String, rtspTcp: Boolean = true) {
 
 @OptIn(UnstableApi::class)
 @Composable
-private fun ExoVideo(url: String, modifier: Modifier, captureKey: String?, rtspTcp: Boolean) {
+private fun ExoVideo(
+    url: String,
+    modifier: Modifier,
+    captureKey: String?,
+    rtspTcp: Boolean,
+    /** With whether it was the decoder's failure ([isDecoderError]) rather than the stream's. */
+    onFailed: ((decoderError: Boolean) -> Unit)?,
+    diagLabel: String = "stream",
+) {
     val context = LocalContext.current
     var textureView by remember { mutableStateOf<TextureView?>(null) }
     val settled = remember(url) { AtomicBoolean(false) }
@@ -202,15 +254,34 @@ private fun ExoVideo(url: String, modifier: Modifier, captureKey: String?, rtspT
             }
             repeatMode = Player.REPEAT_MODE_ALL
             volume = 0f
+            DiagLog.i(CAMERA_TAG, "$diagLabel: open (exoplayer${rtspNote(url, rtspTcp)}) ${safeUrlForLog(url)}")
             addListener(object : Player.Listener {
                 // A frame on screen is the only proof the stream actually worked; "buffering" and
                 // "ready" both happen on streams that never render.
-                override fun onRenderedFirstFrame() { settled.set(true) }
+                override fun onRenderedFirstFrame() {
+                    if (!settled.get()) {
+                        DiagLog.i(CAMERA_TAG, "$diagLabel: first frame (exoplayer) after ${SystemClock.elapsedRealtime() - openedAt} ms")
+                    }
+                    settled.set(true)
+                }
+                override fun onVideoSizeChanged(videoSize: androidx.media3.common.VideoSize) {
+                    if (videoSize.width > 0) DiagLog.i(CAMERA_TAG, "$diagLabel: video ${videoSize.width}x${videoSize.height}")
+                }
+                override fun onPlaybackStateChanged(playbackState: Int) {
+                    DiagLog.i(
+                        CAMERA_TAG,
+                        "$diagLabel: ${playerStateName(playbackState)} after ${SystemClock.elapsedRealtime() - openedAt} ms",
+                    )
+                }
                 override fun onPlayerError(error: PlaybackException) {
+                    // The whole cause chain: a decoder's own code (MediaCodec's errcode) is in there.
+                    DiagLog.w(CAMERA_TAG, "$diagLabel: error (exoplayer) ${error.errorCodeName}", error)
                     reportStreamOutcome(
                         settled, "exoplayer", url, openedAt,
                         "${error.errorCodeName}: ${error.message}",
                     )
+                    // ExoPlayer delivers listener calls on the main thread already.
+                    onFailed?.invoke(isDecoderError(error.errorCode))
                 }
             })
             prepare()
@@ -221,9 +292,18 @@ private fun ExoVideo(url: String, modifier: Modifier, captureKey: String?, rtspT
         onDispose {
             reportStreamOutcome(settled, "exoplayer", url, openedAt, reason = null)
             exo.release()
+            DiagLog.i(CAMERA_TAG, "$diagLabel: released (exoplayer) after ${SystemClock.elapsedRealtime() - openedAt} ms")
         }
     }
     LaunchedEffect(textureView, captureKey) { captureFrames(textureView, captureKey) }
+    // Debug builds: fake the decoder failing after start (DebugFaults).
+    LaunchedEffect(url) {
+        val after = DebugFaults.decoderFailAfterMs() ?: return@LaunchedEffect
+        kotlinx.coroutines.delay(after)
+        runCatching { exo.stop() }
+        reportStreamOutcome(settled, "exoplayer", url, openedAt, "faked decoder failure (debug.tvassist.decoderfail)")
+        onFailed?.invoke(true)
+    }
     // key(url): the factory only attaches `exo` to the TextureView when the view is first created,
     // so when `url` (and thus `exo`) changes we must rebuild the view — otherwise the new player
     // renders to nothing (black video). See the matching VLC path below.
@@ -272,6 +352,8 @@ private fun VlcVideo(
     nextUrl: (() -> String?)? = null,
     onTooLargeForSoftware: (() -> Unit)? = null,
     rtspTcp: Boolean = true,
+    onFailed: (() -> Unit)? = null,
+    diagLabel: String = "stream",
 ) {
     val context = LocalContext.current
     val main = remember { android.os.Handler(android.os.Looper.getMainLooper()) }
@@ -284,7 +366,10 @@ private fun VlcVideo(
     var decoderBusy by remember(url) { mutableStateOf<Boolean?>(null) }
     var surfaceReady by remember(url) { mutableStateOf(false) }
     LaunchedEffect(url) {
-        decoderBusy = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { HardwareDecoder.isBusy() }
+        DiagLog.i(CAMERA_TAG, "$diagLabel: open (vlc${rtspNote(url, rtspTcp)}) ${safeUrlForLog(url)}")
+        val busy = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { HardwareDecoder.isBusy() }
+        DiagLog.i(CAMERA_TAG, "$diagLabel: hardware decoder ${if (busy) "busy, vlc may decode in software" else "free"}")
+        decoderBusy = busy
     }
     LaunchedEffect(textureView, captureKey) { captureFrames(textureView, captureKey) }
     val libVlc = remember { VlcHolder.get(context) }
@@ -371,7 +456,18 @@ private fun VlcVideo(
         }, afterMs)
         player.setEventListener { ev ->
             when (ev.type) {
-                VlcMediaPlayer.Event.Vout -> if (ev.voutCount > 0) settled.set(true)
+                VlcMediaPlayer.Event.Vout -> if (ev.voutCount > 0) {
+                    if (!settled.get()) {
+                        val track = runCatching { player.currentVideoTrack }.getOrNull()
+                        DiagLog.i(
+                            CAMERA_TAG,
+                            "$diagLabel: first frame (vlc) after ${SystemClock.elapsedRealtime() - openedAt} ms" +
+                                // The size is often not known yet at the first frame (0x0).
+                                (track?.takeIf { it.width > 0 }?.let { ", video ${it.width}x${it.height}" } ?: ""),
+                        )
+                    }
+                    settled.set(true)
+                }
                 VlcMediaPlayer.Event.EncounteredError -> {
                     // The event carries no reason. In debug builds libVLC's own preceding lines say
                     // why; release builds silence them (they carried camera passwords), so there
@@ -380,7 +476,13 @@ private fun VlcVideo(
                     // A bad local copy (a truncated download) would otherwise stop the player for
                     // good. Only with [nextUrl]: that is a local file, so retrying costs nothing,
                     // whereas retrying a network URL on error is how the app kept itself blocked.
-                    if (reloadOnEnd && nextUrl != null) loadNext(1000)
+                    if (reloadOnEnd && nextUrl != null) {
+                        loadNext(1000)
+                    } else {
+                        // Not retrying: let the caller replace the dead picture. Posted, since this
+                        // is libVLC's event thread and the caller writes Compose state.
+                        main.post { onFailed?.invoke() }
+                    }
                 }
                 VlcMediaPlayer.Event.EndReached -> if (reloadOnEnd) loadNext(200)
             }
@@ -397,6 +499,7 @@ private fun VlcVideo(
             runCatching { player.stop() }
             runCatching { player.vlcVout.detachViews() }
             runCatching { player.release() }
+            DiagLog.i(CAMERA_TAG, "$diagLabel: released (vlc) after ${SystemClock.elapsedRealtime() - openedAt} ms")
         }
     }
     // Render into a raw TextureView (like ExoPlayer) and force the display aspect to the view so
@@ -436,4 +539,17 @@ private fun VlcVideo(
         },
     )
     }
+}
+
+/** `, rtsp tcp` / `, rtsp udp-first` for an rtsp:// URL, nothing otherwise — for detailed logging. */
+internal fun rtspNote(url: String, rtspTcp: Boolean): String =
+    if (url.startsWith("rtsp", ignoreCase = true)) ", rtsp ${if (rtspTcp) "tcp" else "udp-first"}" else ""
+
+/** Media3's playback state as a word, for detailed logging. */
+internal fun playerStateName(state: Int): String = when (state) {
+    Player.STATE_IDLE -> "idle"
+    Player.STATE_BUFFERING -> "buffering"
+    Player.STATE_READY -> "ready"
+    Player.STATE_ENDED -> "ended"
+    else -> "state $state"
 }
