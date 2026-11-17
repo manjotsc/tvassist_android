@@ -226,6 +226,8 @@ class NotificationServer(
             mediaUrl = pick("media_url", "mediaUrl"),
             mediaType = pick("media_type", "mediaType"),
             player = pick("player").ifBlank { "auto" },
+            // Anything but an explicit "udp" keeps TCP, the default every notification had before.
+            rtspTcp = !pick("rtsp_transport", "rtspTransport").equals("udp", ignoreCase = true),
             interactive = isTruthy(pick("interactive")),
             enlargeTimeout = pick("enlarge_timeout", "enlargeTimeout").toIntOrNull() ?: -1,
             flash = pick("flash"),
