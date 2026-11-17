@@ -32,6 +32,7 @@ import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Remove
 import androidx.compose.ui.text.font.FontWeight
+import com.tvassist.data.settings.MapSource
 import com.tvassist.data.settings.OverlayTile
 import com.tvassist.ui.AccentButton
 import com.tvassist.ui.CardBg
@@ -141,15 +142,29 @@ internal fun MapsPage(viewModel: ConnectionViewModel, onBack: () -> Unit) {
         Text("Map source", fontSize = 16.sp, color = TxtPrimary, fontWeight = FontWeight.SemiBold)
         Spacer(Modifier.height(4.dp))
         Text(
-            "Applies to all person/map tiles. Leave the key blank for free OpenStreetMap; add a Google " +
-                "Maps Platform API key for Google tiles + live traffic (Google bills per map load).",
+            "Which map person and map tiles draw on (a tile or card can override it). OpenStreetMap is " +
+                "free; Google Maps needs a Google Maps Platform API key and is billed by Google. " +
+                "Light/dark, satellite and traffic are switched on the map itself with ▶ and ◀.",
             color = TxtMuted, fontSize = 13.sp,
         )
-        Spacer(Modifier.height(8.dp))
-        Text(
-            if (hasKey) "✓ Key set — using Google tiles" else "No key — using OpenStreetMap",
-            color = if (hasKey) Color(0xFF6FCF7F) else TxtMuted, fontSize = 13.sp,
-        )
+        Spacer(Modifier.height(10.dp))
+        // What is drawn, not just what is stored: a blank choice (older setups) follows the key.
+        // Google without a key stays selected — maps set to it say "API key required" rather than
+        // drawing OpenStreetMap — and the note below says so.
+        val missingKey = MapSource.missingKey(OverlayTile.MAP_AUTO, settings.mapProvider, hasKey)
+        val shown = if (missingKey) MapSource.GOOGLE else MapSource.resolve(OverlayTile.MAP_AUTO, settings.mapProvider, hasKey)
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            MapSource.CHOICES.forEach { (key, label) ->
+                ChipButton(label, shown == key, onClick = { viewModel.setMapProvider(key) })
+            }
+        }
+        if (missingKey) {
+            Spacer(Modifier.height(6.dp))
+            Text(
+                "Google Maps needs an API key — maps set to it show \"API key required\" until one is set in Settings → Security.",
+                color = Color(0xFFF2A33C), fontSize = 12.sp,
+            )
+        }
         Spacer(Modifier.height(16.dp))
 
         WebSetupRow(viewModel, "Maps")
@@ -159,19 +174,19 @@ internal fun MapsPage(viewModel: ConnectionViewModel, onBack: () -> Unit) {
         Spacer(Modifier.height(2.dp))
         Text(
             if (settings.googleMapsApiKey.isNotBlank()) {
-                "A key is set (using Google tiles). Manage it in Settings → Security."
+                "A key is set. Manage it in Settings → Security."
             } else {
-                "No key set (using OpenStreetMap). Add a Google Maps key in Settings → Security for Google tiles."
+                "No key set. Add a Google Maps key in Settings → Security to use Google Maps."
             },
             color = TxtMuted, fontSize = 12.sp,
         )
 
         if (hasKey) {
             Spacer(Modifier.height(18.dp))
-            Text("Map style", color = TxtMuted, fontSize = 14.sp)
+            Text("Google Maps style", color = TxtMuted, fontSize = 14.sp)
             Spacer(Modifier.height(8.dp))
             FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                listOf("roadmap" to "Roadmap", "satellite" to "Satellite").forEach { (value, label) ->
+                MapSource.GOOGLE_LOOKS.forEach { (value, label) ->
                     ChipButton(label, settings.mapStyle == value, onClick = { viewModel.setMapStyle(value) })
                 }
             }
