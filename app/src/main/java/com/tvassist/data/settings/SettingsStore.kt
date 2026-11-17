@@ -14,6 +14,7 @@ import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.emptyPreferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.intPreferencesKey
+import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
@@ -85,6 +86,8 @@ data class SettingsBackup(
     val googleMapsApiKey: String = "",
     val mapStyle: String = "roadmap",
     val mapTraffic: Boolean = false,
+    val mapProvider: String = "",
+    val mapOsmDark: Boolean = true,
     // Audio & announcements (TTS + sound files); per-TV defaults, overridable per HA call.
     val announceEnabled: Boolean = true,
     val announceVolume: Int = 100,
@@ -94,6 +97,9 @@ data class SettingsBackup(
     val announceSoundRepeat: String = "once",
     val announceSpeakRepeat: String = "once",
     val announceRepeatGap: Int = 2,
+    val collectLogs: Boolean = true,
+    val persistLogs: Boolean = false,
+    // Settings.detailedLogsUntil is deliberately not backed up — see there.
 )
 
 // Default overlay colors (ARGB) for fresh installs — match the original hardcoded palette.
@@ -226,6 +232,10 @@ data class Settings(
     val mapStyle: String = "roadmap",
     /** Overlay live traffic on the person map (Google only). */
     val mapTraffic: Boolean = false,
+    /** Which map (`MapSource` key); blank = the old rule, Google if a key is set else OpenStreetMap. */
+    val mapProvider: String = "",
+    /** OpenStreetMap drawn dark (else light). Absent in old backups → dark. */
+    val mapOsmDark: Boolean = true,
     /** Master switch for TTS/sound announcements on this TV. */
     val announceEnabled: Boolean = true,
     /** Default announcement volume 0-100 (relative), when a push doesn't specify one. */
@@ -253,6 +263,16 @@ data class Settings(
     /** Seconds of pause between repeats of a repeating spoken announcement. A push can override with
      * `speak_repeat_gap`. */
     val announceRepeatGap: Int = 2,
+    /** Collect this app's log for issue reports (Settings → Logs). See LogCollector. */
+    val collectLogs: Boolean = true,
+    /** Also keep the log in rotating files so it survives a restart; off = memory only. */
+    val persistLogs: Boolean = false,
+    /**
+     * Epoch ms "Detailed logging" turns itself off at; 0 = off. See DiagLog. Not in backups: it is
+     * a 24-hour window, and restoring one would either do nothing (expired) or switch extra
+     * logging back on that nobody asked for on this TV.
+     */
+    val detailedLogsUntil: Long = 0L,
     /** App-defined cameras (direct stream URLs, bypassing HA's HLS). */
     val localCameras: List<LocalCamera> = emptyList(),
     /** App-defined multi-entity location maps; each surfaces as a synthetic "map.ta_<id>" entity. */
@@ -474,6 +494,8 @@ class SettingsStore(private val context: Context) {
                 googleMapsApiKey = SecretCrypto.decrypt(prefs[KEY_MAPS_KEY] ?: ""),
                 mapStyle = prefs[KEY_MAP_STYLE] ?: "roadmap",
                 mapTraffic = prefs[KEY_MAP_TRAFFIC] ?: false,
+                mapProvider = prefs[KEY_MAP_PROVIDER] ?: "",
+                mapOsmDark = prefs[KEY_MAP_DARK] ?: true,
                 announceEnabled = prefs[KEY_ANNOUNCE_ENABLED] ?: true,
                 announceVolume = prefs[KEY_ANNOUNCE_VOLUME] ?: 100,
                 announceDuckMode = prefs[KEY_ANNOUNCE_DUCK] ?: "duck",
@@ -482,6 +504,9 @@ class SettingsStore(private val context: Context) {
                 announceSoundRepeat = prefs[KEY_ANNOUNCE_SOUND_REPEAT] ?: "once",
                 announceSpeakRepeat = prefs[KEY_ANNOUNCE_SPEAK_REPEAT] ?: "once",
                 announceRepeatGap = prefs[KEY_ANNOUNCE_REPEAT_GAP] ?: 2,
+                collectLogs = prefs[KEY_COLLECT_LOGS] ?: true,
+                persistLogs = prefs[KEY_PERSIST_LOGS] ?: false,
+                detailedLogsUntil = prefs[KEY_DETAILED_LOGS_UNTIL] ?: 0L,
                 localCameras = readLocalCameras(prefs),
                 mapCards = readMapCards(prefs),
                 dimLevel = prefs[KEY_DIM_LEVEL] ?: 0,
@@ -676,10 +701,15 @@ class SettingsStore(private val context: Context) {
         }
     }
 
+    /**
+     * Throws [SecretStorageException] if the token cannot be encrypted, having written nothing.
+     * Encrypted *before* the edit, not inside it, so a failure cannot leave half a write behind.
+     */
     suspend fun setConnection(baseUrl: String, token: String) {
+        val sealed = SecretCrypto.encrypt(token)
         context.credentialsStore.edit { creds ->
             creds[KEY_BASE_URL] = baseUrl
-            creds[KEY_TOKEN] = SecretCrypto.encrypt(token)
+            creds[KEY_TOKEN] = sealed
         }
         // Drop any legacy plaintext copy from the backed-up settings store.
         context.dataStore.edit { prefs ->
@@ -835,6 +865,19 @@ class SettingsStore(private val context: Context) {
         context.dataStore.edit { prefs -> prefs[KEY_ANNOUNCE_REPEAT_GAP] = seconds.coerceIn(0, 60) }
     }
 
+    suspend fun setCollectLogs(on: Boolean) {
+        context.dataStore.edit { prefs -> prefs[KEY_COLLECT_LOGS] = on }
+    }
+
+    suspend fun setPersistLogs(on: Boolean) {
+        context.dataStore.edit { prefs -> prefs[KEY_PERSIST_LOGS] = on }
+    }
+
+    /** Epoch ms detailed logging ends at, or 0 to turn it off now. */
+    suspend fun setDetailedLogsUntil(untilMs: Long) {
+        context.dataStore.edit { prefs -> prefs[KEY_DETAILED_LOGS_UNTIL] = untilMs }
+    }
+
     suspend fun setNotificationsEnabled(enabled: Boolean) {
         context.dataStore.edit { prefs -> prefs[KEY_NOTIFY_ENABLED] = enabled }
     }
@@ -847,12 +890,16 @@ class SettingsStore(private val context: Context) {
         context.dataStore.edit { prefs -> prefs[KEY_ENLARGE_TIMEOUT] = seconds.coerceIn(0, 3600) }
     }
 
+    /** Throws [SecretStorageException], writing nothing, if the token cannot be encrypted. */
     suspend fun setNotificationToken(token: String) {
-        context.dataStore.edit { prefs -> prefs[KEY_NOTIFY_TOKEN] = SecretCrypto.encrypt(token.trim()) }
+        val sealed = SecretCrypto.encrypt(token.trim())
+        context.dataStore.edit { prefs -> prefs[KEY_NOTIFY_TOKEN] = sealed }
     }
 
+    /** Throws [SecretStorageException], writing nothing, if the key cannot be encrypted. */
     suspend fun setGoogleMapsApiKey(key: String) {
-        context.dataStore.edit { prefs -> prefs[KEY_MAPS_KEY] = SecretCrypto.encrypt(key.trim()) }
+        val sealed = SecretCrypto.encrypt(key.trim())
+        context.dataStore.edit { prefs -> prefs[KEY_MAPS_KEY] = sealed }
     }
 
     suspend fun setMapStyle(style: String) {
@@ -861,6 +908,14 @@ class SettingsStore(private val context: Context) {
 
     suspend fun setMapTraffic(on: Boolean) {
         context.dataStore.edit { prefs -> prefs[KEY_MAP_TRAFFIC] = on }
+    }
+
+    suspend fun setMapProvider(key: String) {
+        context.dataStore.edit { prefs -> prefs[KEY_MAP_PROVIDER] = key }
+    }
+
+    suspend fun setMapOsmDark(on: Boolean) {
+        context.dataStore.edit { prefs -> prefs[KEY_MAP_DARK] = on }
     }
 
     suspend fun setStreamPlayer(player: String) {
@@ -1136,11 +1191,13 @@ class SettingsStore(private val context: Context) {
             interactiveEnlargeTimeout = s.interactiveEnlargeTimeout,
             notificationToken = secret(s.notificationToken), streamPlayer = s.streamPlayer,
             googleMapsApiKey = secret(s.googleMapsApiKey), mapStyle = s.mapStyle, mapTraffic = s.mapTraffic,
+            mapProvider = s.mapProvider, mapOsmDark = s.mapOsmDark,
             announceEnabled = s.announceEnabled, announceVolume = s.announceVolume,
             announceDuckMode = s.announceDuckMode, announceLanguage = s.announceLanguage,
             announceSpeakMode = s.announceSpeakMode,
             announceSoundRepeat = s.announceSoundRepeat, announceSpeakRepeat = s.announceSpeakRepeat,
             announceRepeatGap = s.announceRepeatGap,
+            collectLogs = s.collectLogs, persistLogs = s.persistLogs,
         )
     }
 
@@ -1193,9 +1250,15 @@ class SettingsStore(private val context: Context) {
             val haToken = BackupCrypto.decrypt(backup.token, passphrase) ?: ""
             val notifToken = BackupCrypto.decrypt(backup.notificationToken, passphrase) ?: ""
             val mapsKey = BackupCrypto.decrypt(backup.googleMapsApiKey, passphrase) ?: ""
+            // All three sealed before anything is written: the restore below is two separate edits,
+            // and a Keystore failure between them used to leave the credentials restored and the
+            // rest not. Now a failure here fails the restore with nothing changed.
+            val sealedToken = SecretCrypto.encrypt(haToken)
+            val sealedNotif = SecretCrypto.encrypt(notifToken)
+            val sealedMaps = SecretCrypto.encrypt(mapsKey)
             context.credentialsStore.edit { creds ->
                 creds[KEY_BASE_URL] = backup.baseUrl
-                creds[KEY_TOKEN] = SecretCrypto.encrypt(haToken)
+                creds[KEY_TOKEN] = sealedToken
             }
             context.dataStore.edit { prefs ->
                 prefs.remove(KEY_BASE_URL)
@@ -1244,11 +1307,13 @@ class SettingsStore(private val context: Context) {
                 prefs[KEY_NOTIFY_PORT] = backup.notificationPort
                 prefs[KEY_NOTIFY_DURATION] = backup.notificationDefaultDuration
                 prefs[KEY_ENLARGE_TIMEOUT] = backup.interactiveEnlargeTimeout
-                prefs[KEY_NOTIFY_TOKEN] = SecretCrypto.encrypt(notifToken)
+                prefs[KEY_NOTIFY_TOKEN] = sealedNotif
                 prefs[KEY_STREAM_PLAYER] = backup.streamPlayer
-                prefs[KEY_MAPS_KEY] = SecretCrypto.encrypt(mapsKey)
+                prefs[KEY_MAPS_KEY] = sealedMaps
                 prefs[KEY_MAP_STYLE] = backup.mapStyle
                 prefs[KEY_MAP_TRAFFIC] = backup.mapTraffic
+                prefs[KEY_MAP_PROVIDER] = backup.mapProvider
+                prefs[KEY_MAP_DARK] = backup.mapOsmDark
                 prefs[KEY_ANNOUNCE_ENABLED] = backup.announceEnabled
                 prefs[KEY_ANNOUNCE_VOLUME] = backup.announceVolume
                 prefs[KEY_ANNOUNCE_DUCK] = backup.announceDuckMode
@@ -1257,6 +1322,8 @@ class SettingsStore(private val context: Context) {
                 prefs[KEY_ANNOUNCE_SOUND_REPEAT] = backup.announceSoundRepeat
                 prefs[KEY_ANNOUNCE_SPEAK_REPEAT] = backup.announceSpeakRepeat
                 prefs[KEY_ANNOUNCE_REPEAT_GAP] = backup.announceRepeatGap
+                prefs[KEY_COLLECT_LOGS] = backup.collectLogs
+                prefs[KEY_PERSIST_LOGS] = backup.persistLogs
             }
             // Return the DECRYPTED secrets so callers (e.g. reconnect-after-restore) get the real token,
             // not the "enc1:" ciphertext that was in the file.
@@ -1314,6 +1381,9 @@ class SettingsStore(private val context: Context) {
         val KEY_MAPS_KEY = stringPreferencesKey("google_maps_key")
         val KEY_MAP_STYLE = stringPreferencesKey("map_style")
         val KEY_MAP_TRAFFIC = booleanPreferencesKey("map_traffic")
+        val KEY_MAP_PROVIDER = stringPreferencesKey("map_provider")
+        /** OpenStreetMap's light/dark (the field is `mapOsmDark`; the key predates the rename). */
+        val KEY_MAP_DARK = booleanPreferencesKey("map_dark")
         val KEY_ANNOUNCE_ENABLED = booleanPreferencesKey("announce_enabled")
         val KEY_ANNOUNCE_VOLUME = intPreferencesKey("announce_volume")
         val KEY_ANNOUNCE_DUCK = stringPreferencesKey("announce_duck_mode")
@@ -1322,6 +1392,9 @@ class SettingsStore(private val context: Context) {
         val KEY_ANNOUNCE_SOUND_REPEAT = stringPreferencesKey("announce_sound_repeat")
         val KEY_ANNOUNCE_SPEAK_REPEAT = stringPreferencesKey("announce_speak_repeat")
         val KEY_ANNOUNCE_REPEAT_GAP = intPreferencesKey("announce_repeat_gap")
+        val KEY_COLLECT_LOGS = booleanPreferencesKey("collect_logs")
+        val KEY_PERSIST_LOGS = booleanPreferencesKey("persist_logs")
+        val KEY_DETAILED_LOGS_UNTIL = longPreferencesKey("detailed_logs_until")
         val KEY_LOCAL_CAMERAS = stringPreferencesKey("local_cameras")
         val KEY_MAP_CARDS = stringPreferencesKey("map_cards")
         val KEY_FIXED_PILLS = stringPreferencesKey("fixed_pills")
