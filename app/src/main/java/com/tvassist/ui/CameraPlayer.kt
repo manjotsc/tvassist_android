@@ -1,5 +1,6 @@
 package com.tvassist.ui
 
+import com.tvassist.data.logs.DiagLog
 import android.graphics.BitmapFactory
 import android.view.TextureView
 import androidx.annotation.OptIn
@@ -45,7 +46,14 @@ import com.tvassist.ui.cards.camera.CameraFrameCache
 import com.tvassist.ui.cards.camera.CLIP_REFRESH_MS
 import com.tvassist.ui.cards.camera.CameraSource
 import com.tvassist.ui.cards.camera.HardwareDecoder
+import com.tvassist.ui.cards.camera.DebugFaults
+import com.tvassist.ui.cards.camera.afterDecoderFailure
 import com.tvassist.ui.cards.camera.chooseCameraSource
+import com.tvassist.ui.cards.camera.isDecoderError
+import com.tvassist.ui.cards.camera.cameraPlayer
+import com.tvassist.ui.cards.camera.vlcAfterExoFailure
+import com.tvassist.ui.cards.camera.firstEngine
+import com.tvassist.ui.cards.camera.VideoEngine
 import com.tvassist.ui.cards.camera.decodeOffThread
 import com.tvassist.ui.cards.camera.grabFramesInto
 import com.tvassist.ui.cards.camera.rememberRollingClip
@@ -86,8 +94,16 @@ fun CameraPlayerScreen(
     var tooLarge by remember(entity.entityId) { mutableStateOf(false) }
     // Set when the decoder is taken and there is no low-res stream: snapshots only (CameraSource.UNAVAILABLE).
     var unavailable by remember(entity.entityId) { mutableStateOf(false) }
+    // Set when the decoder failed *after* a stream started and nothing smaller was left to try:
+    // snapshots only, with its own note (see afterDecoderFailure).
+    var decoderFailed by remember(entity.entityId) { mutableStateOf(false) }
     var snapshot by remember(entity.entityId) { mutableStateOf<ImageBitmap?>(null) }
     var playing by remember(entity.entityId) { mutableStateOf(false) }
+    // Whether the hardware decoder was taken when the stream was chosen: Auto then plays on VLC,
+    // the engine that can decode without it (firstEngine).
+    var decoderBusyAtStart by remember(entity.entityId) { mutableStateOf(false) }
+    // Set when ExoPlayer failed on the stream itself under Auto: VLC gets a second try.
+    var exoGaveUp by remember(entity.entityId) { mutableStateOf(false) }
 
     // Seed the poster from the last captured frame (so even a snapshot-less camera shows something).
     LaunchedEffect(entity.entityId) { snapshot = CameraFrameCache.get(entity.entityId) }
@@ -119,7 +135,13 @@ fun CameraPlayerScreen(
         // ask. The check is tens of milliseconds, behind a poster that is already showing.
         var busy = withContext(Dispatchers.IO) { HardwareDecoder.isBusy() }
         val lowRes = entity.localLowResUrl
-        when (chooseCameraSource(busy, lowRes != null, inOverlay)) {
+        val source = chooseCameraSource(busy, lowRes != null, inOverlay)
+        DiagLog.i(
+            "HaCamera",
+            "camera ${entity.entityId}: decoder ${if (busy) "busy" else "free"}, " +
+                "low-res ${if (lowRes != null) "set" else "none"}, ${if (inOverlay) "overlay" else "app"} -> $source",
+        )
+        when (source) {
             CameraSource.MAIN -> url = main
             CameraSource.LOW_RES -> url = lowRes
             CameraSource.UNAVAILABLE -> unavailable = true
@@ -136,10 +158,30 @@ fun CameraPlayerScreen(
                 url = main
             }
         }
+        decoderBusyAtStart = busy
+    }
+
+    /**
+     * The decoder gave up on [fromUrl] after it started. Step down one rung: the low-res stream if
+     * that is not what just failed, else snapshots. Main thread only (it writes Compose state).
+     */
+    fun onDecoderFailed(fromUrl: String) {
+        val lowRes = entity.localLowResUrl
+        when (afterDecoderFailure(playingLowRes = fromUrl == lowRes, hasLowRes = lowRes != null)) {
+            CameraSource.LOW_RES -> {
+                android.util.Log.i("HaCamera", "decoder failed after the stream started; trying the low-res stream")
+                url = lowRes
+            }
+            else -> {
+                android.util.Log.i("HaCamera", "decoder failed after the stream started; showing snapshots instead")
+                url = null
+                decoderFailed = true
+            }
+        }
     }
 
     // No live video to be had: keep the snapshot current instead, at the pace a camera tile uses.
-    if (unavailable) {
+    if (unavailable || decoderFailed) {
         LaunchedEffect(entity.entityId) {
             while (true) {
                 delay(UNAVAILABLE_REFRESH_MS)
@@ -158,8 +200,8 @@ fun CameraPlayerScreen(
     // collectAsState); Flow operators must not be invoked directly in composition.
     val playerFlow = remember(app) { app.settingsStore.settings.map { it.streamPlayer } }
     val globalPlayer by playerFlow.collectAsState(initial = "auto")
-    // A local camera can pin its own engine; otherwise use the app-wide default.
-    val streamPlayer = if (entity.isLocalCamera) entity.localPlayer else globalPlayer
+    // A local camera can pin its own engine or follow the app-wide default; an HA camera follows it.
+    val streamPlayer = if (entity.isLocalCamera) cameraPlayer(entity.localPlayer, globalPlayer) else globalPlayer
     // Only a local camera has the setting; an HA camera plays HA's HLS, which is not RTSP anyway.
     val rtspTcp = !entity.isLocalCamera || entity.localRtspTcp
 
@@ -189,14 +231,18 @@ fun CameraPlayerScreen(
         val u = if (downloaded) firstClip else source
         val nextUrl: (() -> String?)? = if (downloaded) ({ latestClip }) else null
         val useVlc = u != null &&
-            (streamPlayer.equals("vlc", true) || (streamPlayer.equals("auto", true) && u.startsWith("rtsp", true)))
+            (exoGaveUp || firstEngine(streamPlayer, decoderBusyAtStart) == VideoEngine.VLC)
         if (u != null && useVlc) {
             // libVLC path (HEVC / quirky RTSP / software fallback).
             StreamVideo(
                 url = u, player = "vlc", modifier = Modifier.fillMaxSize(), captureKey = entity.entityId,
+                diagLabel = "camera ${entity.entityId}",
                 reloadOnEnd = reloadOnEnd, nextUrl = nextUrl,
                 onTooLargeForSoftware = { tooLarge = true },
                 rtspTcp = rtspTcp,
+                // libVLC falls back to software decoding by itself, so an error here is the stream's,
+                // not the decoder's: say so instead of leaving the poster up with no word.
+                onFailed = { failed = true },
             )
         } else if (u != null) {
             var exoTexture by remember(u) { mutableStateOf<TextureView?>(null) }
@@ -215,6 +261,8 @@ fun CameraPlayerScreen(
                     setStreamUrl(u, rtspTcp) // TCP for rtsp:// unless the camera opts out — see setStreamUrl
                     prepare()
                     playWhenReady = true
+                    val openedAt = SystemClock.elapsedRealtime()
+                    DiagLog.i("HaCamera", "camera ${entity.entityId}: open (exoplayer${rtspNote(u, rtspTcp)}) ${safeUrlForLog(u)}")
                     addListener(object : Player.Listener {
                         // The next clip: the newest downloaded copy, or — without a download — the URL
                         // again, whose next HTTP request pulls a fresh clip.
@@ -226,6 +274,17 @@ fun CameraPlayerScreen(
                         override fun onIsPlayingChanged(isPlaying: Boolean) {
                             playing = isPlaying
                         }
+                        override fun onRenderedFirstFrame() {
+                            DiagLog.i(
+                                "HaCamera",
+                                "camera ${entity.entityId}: first frame (exoplayer) after ${SystemClock.elapsedRealtime() - openedAt} ms",
+                            )
+                        }
+                        override fun onVideoSizeChanged(videoSize: androidx.media3.common.VideoSize) {
+                            if (videoSize.width > 0) {
+                                DiagLog.i("HaCamera", "camera ${entity.entityId}: video ${videoSize.width}x${videoSize.height}")
+                            }
+                        }
                         override fun onPlaybackStateChanged(state: Int) {
                             if (state == Player.STATE_ENDED && reloadOnEnd) {
                                 // Small backoff (like the VLC path) so a fast/empty clip can't hammer.
@@ -233,6 +292,7 @@ fun CameraPlayerScreen(
                             }
                         }
                         override fun onPlayerError(error: PlaybackException) {
+                            DiagLog.w("HaCamera", "camera ${entity.entityId}: error (exoplayer) ${error.errorCodeName}", error)
                             // Same shape as the StreamVideo paths, so one grep for "stream failed"
                             // finds every engine's version of this.
                             android.util.Log.w(
@@ -240,11 +300,23 @@ fun CameraPlayerScreen(
                                 "stream failed (exoplayer): ${safeUrlForLog(u)} — " +
                                     "${error.errorCodeName}: ${error.message}",
                             )
+                            // The decoder, not the stream: retrying the same stream would fail the
+                            // same way, so step down instead (low-res, then snapshots).
+                            if (isDecoderError(error.errorCode)) {
+                                main.post { onDecoderFailed(u) }
+                                return
+                            }
                             // A rolling-clip cam shouldn't die on a transient blip — retry instead of giving up.
                             // A local copy retries at once, since that costs nothing. A network URL
                             // waits: retrying it every second is how a refusing server (Cloudflare's
                             // 403) was kept refusing, with the app never getting a picture back.
                             when {
+                                // Auto: the stream, not the decoder, defeated ExoPlayer — VLC reaches
+                                // servers and codecs it does not. Explicit "exoplayer" means exactly that.
+                                !reloadOnEnd && vlcAfterExoFailure(streamPlayer, decoderError = false, hasDecoderLadder = true) -> {
+                                    DiagLog.i("HaCamera", "camera ${entity.entityId}: exoplayer could not play it, trying vlc (auto)")
+                                    exoGaveUp = true
+                                }
                                 !reloadOnEnd -> failed = true
                                 nextUrl != null -> main.postDelayed({ refetch() }, 1000)
                                 else -> main.postDelayed({ refetch() }, CLIP_REFRESH_MS)
@@ -253,7 +325,20 @@ fun CameraPlayerScreen(
                     })
                 }
             }
-            DisposableEffect(u) { onDispose { main.removeCallbacksAndMessages(null); player.release() } }
+            DisposableEffect(u) {
+                onDispose {
+                    main.removeCallbacksAndMessages(null)
+                    player.release()
+                    DiagLog.i("HaCamera", "camera ${entity.entityId}: released (exoplayer)")
+                }
+            }
+            // Debug builds: fake the decoder failing after start (DebugFaults), the case no TV here produces.
+            LaunchedEffect(u) {
+                val after = DebugFaults.decoderFailAfterMs(lowRes = u == entity.localLowResUrl) ?: return@LaunchedEffect
+                delay(after)
+                android.util.Log.w("HaCamera", "stream failed (exoplayer): faked decoder failure (debug.tvassist.decoderfail)")
+                onDecoderFailed(u)
+            }
             // key(u): rebuild the TextureView when the stream URL changes so the new player attaches
             // (the factory only wires the player to the view on first creation).
             key(u) {
@@ -268,6 +353,15 @@ fun CameraPlayerScreen(
             unavailable -> Text(
                 "Another app is using the TV's video decoder, so this camera can't play live right now." +
                     "\nAdd a low-res stream for it in Settings → Cameras to watch it live over other apps.",
+                color = Color.White, fontSize = 16.sp,
+                modifier = Modifier.align(Alignment.BottomCenter)
+                    .background(Color(0xB3000000))
+                    .padding(horizontal = 24.dp, vertical = 14.dp),
+            )
+            decoderFailed -> Text(
+                "The TV's video decoder stopped playing this camera — usually because another app is " +
+                    "using it.\nShowing snapshots instead." +
+                    if (entity.localLowResUrl == null) " Add a low-res stream in Settings → Cameras to keep it live." else "",
                 color = Color.White, fontSize = 16.sp,
                 modifier = Modifier.align(Alignment.BottomCenter)
                     .background(Color(0xB3000000))
