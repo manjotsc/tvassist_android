@@ -16,8 +16,13 @@ import javax.crypto.spec.GCMParameterSpec
  *
  * [encrypt] output is tagged with [PREFIX]; [decrypt] passes anything without that tag through
  * unchanged, so pre-encryption plaintext values keep working and get re-encrypted on their next
- * write. If the Keystore is somehow unavailable, [encrypt] falls back to storing plaintext rather
- * than losing the value; an unreadable ciphertext decrypts to "" (forcing a harmless re-entry).
+ * write. An unreadable ciphertext decrypts to "" (forcing a harmless re-entry).
+ *
+ * **[encrypt] never falls back to plaintext.** It used to: when the Keystore failed it returned its
+ * input, and the save went on to store the HA token unencrypted while reporting success (issue #2).
+ * It now throws [SecretStorageException], and every caller encrypts *before* opening its DataStore
+ * edit, so a failure writes nothing and the previous value stays as it was. Reading legacy
+ * plaintext is unaffected.
  */
 object SecretCrypto {
     private const val ALIAS = "tvassist_secret_v1"
@@ -48,16 +53,35 @@ object SecretCrypto {
         return kg.generateKey()
     }
 
-    /** Encrypt a secret for storage. Blank stays blank; failures fall back to plaintext. */
+    /**
+     * The Keystore round-trip itself, swappable so a JVM test can make it fail — the Android
+     * Keystore does not exist off-device. Production never reassigns it.
+     */
+    internal var keystoreEncrypt: (String) -> String = { plain ->
+        val cipher = Cipher.getInstance(TRANSFORM)
+        cipher.init(Cipher.ENCRYPT_MODE, secretKey())
+        val iv = cipher.iv
+        val ct = cipher.doFinal(plain.toByteArray(Charsets.UTF_8))
+        PREFIX + Base64.encodeToString(iv + ct, Base64.NO_WRAP)
+    }
+
+    /**
+     * Encrypt a secret for storage. Blank stays blank. Throws [SecretStorageException] if the
+     * Keystore cannot encrypt it — never returns the plaintext (see the class comment).
+     */
     fun encrypt(plain: String): String {
         if (plain.isEmpty()) return ""
-        return runCatching {
-            val cipher = Cipher.getInstance(TRANSFORM)
-            cipher.init(Cipher.ENCRYPT_MODE, secretKey())
-            val iv = cipher.iv
-            val ct = cipher.doFinal(plain.toByteArray(Charsets.UTF_8))
-            PREFIX + Base64.encodeToString(iv + ct, Base64.NO_WRAP)
-        }.getOrDefault(plain)
+        return try {
+            // Debug builds only: stands in for a Keystore that refuses (DebugFaults).
+            if (com.tvassist.ui.cards.camera.DebugFaults.keystoreFails()) {
+                throw java.security.KeyStoreException("faked by debug.tvassist.keystorefail")
+            }
+            keystoreEncrypt(plain)
+        } catch (e: Exception) {
+            // The cause's message only: a Keystore exception does not carry the secret, but the
+            // input must never reach a log or an error string, so it is not formatted in here.
+            throw SecretStorageException(e)
+        }
     }
 
     /** Decrypt a stored secret. Untagged values (legacy plaintext / blank) pass through unchanged. */
@@ -77,3 +101,10 @@ object SecretCrypto {
         return plain
     }
 }
+
+/**
+ * Android's secure key storage could not encrypt a secret, so it was not saved. Carries the
+ * Keystore's own exception as the cause; never the secret.
+ */
+class SecretStorageException(cause: Throwable) :
+    Exception("Android's secure key storage could not encrypt it (${cause.javaClass.simpleName})", cause)
