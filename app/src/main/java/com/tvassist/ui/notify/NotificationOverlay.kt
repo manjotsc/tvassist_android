@@ -148,17 +148,34 @@ fun NotificationEnlarged(items: List<TvNotification>, enlargedId: String?, repos
         }
     }
     var still by remember(n.id) { mutableStateOf<ImageBitmap?>(null) }
-    LaunchedEffect(n.id, vUrl) {
+    // Set when the stream died and its engine is not retrying it (StreamVideo's onFailed).
+    var failed by remember(n.id, n.createdAt) { mutableStateOf(false) }
+    LaunchedEffect(n.id) {
+        com.tvassist.data.logs.DiagLog.i(
+            "HaCamera",
+            "enlarged notification ${n.id}: opened (player ${n.player}, " +
+                "camera_stream ${n.cameraStream.isNotBlank()}, camera ${n.camera.isNotBlank()})",
+        )
+    }
+    LaunchedEffect(failed) {
+        if (failed) com.tvassist.data.logs.DiagLog.i("HaCamera", "enlarged notification ${n.id}: video failed, showing snapshot or message")
+    }
+    LaunchedEffect(n.id, vUrl, failed) {
         val camId = n.cameraStream.ifBlank { n.camera }
-        if (vUrl == null && camId.isNotBlank()) {
+        if ((vUrl == null || failed) && camId.isNotBlank()) {
             still = repository.cameraSnapshot(camId)?.let { decodeOffThread(it)?.asImageBitmap() }
         }
     }
     Box(Modifier.fillMaxSize().background(Color.Black), contentAlignment = Alignment.Center) {
         val v = vUrl
         when {
-            v != null -> StreamVideo(url = v, player = n.player, modifier = Modifier.fillMaxSize())
+            v != null && !failed ->
+                StreamVideo(
+                    url = v, player = n.player, modifier = Modifier.fillMaxSize(), onFailed = { failed = true },
+                    diagLabel = "enlarged notification ${n.id}", rtspTcp = n.rtspTcp,
+                )
             still != null -> Image(still!!, null, Modifier.fillMaxSize(), contentScale = ContentScale.Fit)
+            failed -> Text("Live video unavailable", color = Color.White, fontSize = 18.sp)
             else -> Text("Loading ${n.title.ifBlank { "camera" }}…", color = Color.White, fontSize = 18.sp)
         }
         Text(
@@ -242,6 +259,9 @@ private fun NotificationCard(
     }
     // Instant snapshot poster shown under the video while the stream starts (masks startup latency).
     var videoPoster by remember(n.id) { mutableStateOf<ImageBitmap?>(null) }
+    // Set when the stream died and its engine is not retrying it. Keyed like the poster's effect, so
+    // a repeat trigger reusing this card's id gets a fresh attempt rather than the old failure.
+    var videoFailed by remember(n.id, n.createdAt) { mutableStateOf(false) }
     LaunchedEffect(n.id, n.createdAt, n.cameraStream) {
         val camId = n.cameraStream.ifBlank { n.camera }
         if (camId.isNotBlank()) {
@@ -352,13 +372,36 @@ private fun NotificationCard(
             val vUrl = videoUrl
             when {
                 vUrl != null -> Box(
-                    Modifier.fillMaxWidth().aspectRatio(16f / 9f).clip(RoundedCornerShape(10.dp)),
+                    // Solid behind everything: the card itself is translucent, so a video area with
+                    // no poster (any stream not tied to an HA camera — a direct rtsp:// doorbell)
+                    // showed whatever was on TV through it, and after a failed stream stayed that
+                    // way: issue #3's "empty, see-through box".
+                    Modifier.fillMaxWidth().aspectRatio(16f / 9f).clip(RoundedCornerShape(10.dp))
+                        .background(MEDIA_BACKGROUND),
+                    contentAlignment = Alignment.Center,
                 ) {
                     // Snapshot shows instantly; the video draws over it once it starts.
                     videoPoster?.let {
                         Image(it, contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
                     }
-                    if (playVideo) StreamVideo(url = vUrl, player = n.player, modifier = Modifier.fillMaxSize())
+                    if (playVideo && !videoFailed) {
+                        StreamVideo(
+                            url = vUrl, player = n.player, modifier = Modifier.fillMaxSize(),
+                            onFailed = { videoFailed = true }, diagLabel = "notification card ${n.id}",
+                            rtspTcp = n.rtspTcp,
+                        )
+                    }
+                    if (videoFailed) {
+                        // Over the poster, a small label at the bottom; with no poster, the box's only content.
+                        Text(
+                            "Live video unavailable",
+                            color = NotifColors.text, fontSize = (12 * sizeScale).sp,
+                            modifier = (if (videoPoster != null) Modifier.align(Alignment.BottomCenter) else Modifier)
+                                .padding(8.dp)
+                                .background(Color(0xB3000000), RoundedCornerShape(6.dp))
+                                .padding(horizontal = 8.dp, vertical = 3.dp),
+                        )
+                    }
                 }
                 image != null -> Image(
                     bitmap = image!!,
@@ -453,3 +496,6 @@ private fun IconBubble(spec: String, tint: Color, bg: Color, sizeDp: Int, reposi
         }
     }
 }
+
+/** Behind a notification's video: solid, so a stream that has not started (or died) never shows the TV through the card. */
+private val MEDIA_BACKGROUND = Color(0xFF0B0E12)
