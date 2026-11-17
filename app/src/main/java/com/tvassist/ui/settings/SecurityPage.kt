@@ -1,5 +1,6 @@
 package com.tvassist.ui.settings
 
+import androidx.compose.ui.graphics.Color
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -42,7 +43,14 @@ internal fun randomToken(length: Int = 24): String {
 internal fun SecurityPage(viewModel: ConnectionViewModel, onBack: () -> Unit) {
     val settings by viewModel.settings.collectAsStateWithLifecycle()
     val ip = remember { com.tvassist.data.notify.NotificationServer.localIp() }
+    val secretError by viewModel.secretSaveError.collectAsStateWithLifecycle()
     PageScaffold("Security", onBack) {
+        // Every secret on this page saves through the Keystore; when that fails nothing is stored,
+        // and the field still showing the new value would otherwise read as saved.
+        secretError?.let {
+            Text(it, color = Color(0xFFFF8A80), fontSize = 13.sp)
+            Spacer(Modifier.height(10.dp))
+        }
         Text(
             "Access tokens and keys that secure this TV — all encrypted at rest and shown masked. " +
                 "Enter or regenerate them here.",
@@ -115,10 +123,18 @@ internal fun SecurityPage(viewModel: ConnectionViewModel, onBack: () -> Unit) {
             delay(400)
             viewModel.setNotificationToken(tok)
         }
-        justGenerated?.let { g ->
+        // A save that failed must say so *here*: the page-top note is scrolled out of view by the
+        // time focus reaches this button, and "copy it into Home Assistant now" for a token the TV
+        // never stored would have the user configure HA with a token this TV rejects.
+        if (secretError != null && tok != settings.notificationToken) {
             Spacer(Modifier.height(8.dp))
-            Text("New token — copy it into Home Assistant now (it won't be shown again):", color = AppAccent, fontSize = 12.sp)
-            Text(g, color = TxtPrimary, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+            Text(secretError.orEmpty(), color = Color(0xFFFF8A80), fontSize = 12.sp)
+        } else {
+            justGenerated?.let { g ->
+                Spacer(Modifier.height(8.dp))
+                Text("New token — copy it into Home Assistant now (it won't be shown again):", color = AppAccent, fontSize = 12.sp)
+                Text(g, color = TxtPrimary, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+            }
         }
         Spacer(Modifier.height(8.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -138,6 +154,10 @@ internal fun SecurityPage(viewModel: ConnectionViewModel, onBack: () -> Unit) {
         Spacer(Modifier.height(6.dp))
         var mapsKey by remember { mutableStateOf(settings.googleMapsApiKey) }
         TvTextField(value = mapsKey, onValueChange = { mapsKey = it }, placeholder = "Google Maps API key (optional)", secret = true)
+        if (secretError != null && mapsKey != settings.googleMapsApiKey) {
+            Spacer(Modifier.height(6.dp))
+            Text(secretError.orEmpty(), color = Color(0xFFFF8A80), fontSize = 12.sp)
+        }
         LaunchedEffect(mapsKey) {
             if (mapsKey == settings.googleMapsApiKey) return@LaunchedEffect
             delay(500)
