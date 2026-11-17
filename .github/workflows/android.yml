@@ -37,7 +37,7 @@ jobs:
       workflows: ${{ steps.changes.outputs.workflows }}
       test-matrix: ${{ steps.areas.outputs.test-matrix }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -89,10 +89,10 @@ jobs:
     if: needs.info.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # Checks gradle-wrapper.jar against Gradle's published checksums: a tampered wrapper would
       # run arbitrary code in every build.
-      - uses: gradle/actions/wrapper-validation@v4
+      - uses: gradle/actions/wrapper-validation@v6
 
   actionlint:
     name: Lint workflow files
@@ -100,7 +100,7 @@ jobs:
     if: needs.info.outputs.workflows == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # Pinned image rather than a script fetched from a branch: the same actionlint every run.
       - name: actionlint
         run: docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.7 -color
@@ -111,7 +111,7 @@ jobs:
     if: needs.info.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-gradle-build
       # Resolve everything the jobs below will need, once, so they start from a warm cache
       # instead of each downloading the same dependencies in parallel.
@@ -127,7 +127,7 @@ jobs:
     needs: prepare
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-gradle-build
       - name: assembleDebug
         run: ./gradlew --no-daemon :app:assembleDebug
@@ -141,7 +141,7 @@ jobs:
       # To show lint findings on the code (GitHub code scanning).
       security-events: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-gradle-build
       - name: lintDebug
         run: ./gradlew --no-daemon :app:lintDebug
@@ -157,13 +157,13 @@ jobs:
       - name: Show errors on the code
         if: ${{ !cancelled() && hashFiles('app/build/reports/lint-errors.sarif') != '' }}
         continue-on-error: true
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: app/build/reports/lint-errors.sarif
           category: android-lint
       - name: Upload lint report
         if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: lint-report
           path: app/build/reports/lint-results-debug.html
@@ -180,7 +180,7 @@ jobs:
       matrix:
         include: ${{ fromJSON(needs.info.outputs.test-matrix) }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-gradle-build
       - name: testDebugUnitTest
         env:
@@ -188,14 +188,14 @@ jobs:
         run: ./gradlew --no-daemon :app:testDebugUnitTest "-PtestInclude=${TEST_INCLUDE}"
       - name: Upload test results
         if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: test-results-${{ matrix.slug }}
           path: app/build/test-results/testDebugUnitTest/*.xml
           if-no-files-found: ignore
       - name: Upload test report
         if: ${{ failure() }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: test-report-${{ matrix.slug }}
           path: app/build/reports/tests/testDebugUnitTest/
@@ -207,8 +207,8 @@ jobs:
     if: ${{ !cancelled() && needs.unit-tests.result != 'skipped' }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
         with:
           pattern: test-results-*
           path: results
@@ -221,7 +221,7 @@ jobs:
     needs: prepare
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-gradle-build
       # R8 shrinking and obfuscation only happen here. Release-only breakage — a missing keep rule,
       # a class R8 renamed that something looks up by name — passes every other job.
