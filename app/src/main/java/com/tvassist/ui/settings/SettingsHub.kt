@@ -34,6 +34,7 @@ import androidx.tv.material3.Text
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Backup
+import androidx.compose.material.icons.rounded.BugReport
 import androidx.compose.material.icons.rounded.ChevronRight
 import androidx.compose.material.icons.rounded.Notifications
 import androidx.compose.material.icons.rounded.Info
@@ -83,6 +84,7 @@ internal fun SettingsHub(viewModel: ConnectionViewModel, onOpen: (Route) -> Unit
         HubItem(Icons.Rounded.Videocam, "Cameras", "Add direct-URL cameras (RTSP/HTTP) that start instantly") { onOpen(Route.Cameras) }
         HubItem(Icons.Rounded.Map, "Maps", "Multi-entity map cards + Google Maps source") { onOpen(Route.Maps) }
         HubItem(Icons.Rounded.Backup, "Backup & restore", "Save or restore your settings to a file") { onOpen(Route.Backup) }
+        HubItem(Icons.Rounded.BugReport, "Logs", "Collect a log to attach to an issue report") { onOpen(Route.Logs) }
         HubItem(Icons.Rounded.Info, "About", "Version & info") { onOpen(Route.About) }
     }
 }
