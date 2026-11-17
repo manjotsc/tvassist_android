@@ -15,8 +15,12 @@ data class LocalCamera(
     val streamUrl: String,
     /** Optional still-image URL (JPEG snapshot) for the tile preview + snapshot-first playback. */
     val snapshotUrl: String = "",
-    /** auto / exoplayer / vlc. */
-    val player: String = "auto",
+    /**
+     * default / auto / exoplayer / vlc. [PLAYER_DEFAULT] follows the global player setting (Settings
+     * → Cameras), and is what new cameras get. Stored cameras always carry an explicit value (the
+     * settings JSON encodes defaults), so changing this default moved no existing camera.
+     */
+    val player: String = PLAYER_DEFAULT,
     /** Reload the URL when the clip ends, for "rolling clip" cameras that return a short looped
      *  video per request instead of a continuous stream — keeps them live. */
     val refresh: Boolean = false,
@@ -40,4 +44,9 @@ data class LocalCamera(
      * ignored for anything that is not RTSP.
      */
     val rtspTcp: Boolean = true,
-)
+) {
+    companion object {
+        /** Follow the global player setting. Persisted; do not rename. */
+        const val PLAYER_DEFAULT = "default"
+    }
+}
