@@ -6,6 +6,7 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -14,6 +15,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
@@ -50,6 +52,9 @@ import com.tvassist.ui.LocalOverlayTheme
 import com.tvassist.ui.cards.EntityCard
 import com.tvassist.ui.cards.EntityControlActions
 import com.tvassist.ui.cards.generic.GenericControls
+import com.tvassist.data.settings.MapSource
+import com.tvassist.ui.maps.VectorLook
+import com.tvassist.ui.maps.vectorMapSnapshot
 
 /**
  * The `map` domain — an app-defined map card, never a Home Assistant entity (see
@@ -110,9 +115,16 @@ internal fun MapCardTile(
     val th = LocalOverlayTheme.current
     val zoom = entity.mapCardZoom
     val provider = entity.mapCardProvider
-    val cacheKey = mapThumbKey(entity)
+    // The theme is read live so flipping it on a map (or in Settings) redraws the thumbnail too.
+    // Everything that changes the picture (which map, light/dark, Google's look) is in the key, so
+    // a change on a map or in Settings redraws the thumbnail too.
+    val appearance by repository.mapAppearanceFlow.collectAsState(initial = null)
+    val cacheKey = mapThumbKey(entity) + "|" + appearance
     var map by remember(cacheKey) { mutableStateOf(MapThumbCache.get(cacheKey)) }
     var onHome by remember(cacheKey) { mutableStateOf(false) }
+    // Set to Google with no API key: no picture, and the subtitle says why (MapSource.missingKey).
+    var needsKey by remember(cacheKey) { mutableStateOf(false) }
+    val context = LocalContext.current
     LaunchedEffect(cacheKey) {
         // Home does not move, so this is fetched once and cached for the life of the process — a
         // refresh loop like the camera's would re-composite tiles to redraw the same street.
@@ -130,11 +142,23 @@ internal fun MapCardTile(
                 pts.fold(0.0 to 0.0) { a, p -> (a.first + p.first) to (a.second + p.second) }
                     .let { (it.first / pts.size) to (it.second / pts.size) }
             }
+        if (appearance == null) return@LaunchedEffect // wait for the settings, or the first frame is wrong
+        needsKey = repository.mapNeedsKey(provider)
+        if (needsKey) return@LaunchedEffect
+        val source = repository.resolvedMapSource(provider)
         if (map == null && centre != null) {
             // radius 1 — a 512px composite. The fullscreen view asks for 2 because it pans; a
             // thumbnail never does, and four times the tiles for the same picture is four times
             // the fetching. Every style crops the same bitmap, so switching styles fetches nothing.
-            repository.fetchPersonMap(centre.first, centre.second, zoom, provider, radius = 1)
+            // OpenStreetMap renders the same 512 px frame from vector tiles, so the thumbnail
+            // matches the fullscreen map it opens.
+            val bitmap = if (source != MapSource.GOOGLE) {
+                val look = VectorLook.of(source, repository.mapDark(source))
+                vectorMapSnapshot(context, centre.first, centre.second, zoom, look)
+            } else {
+                repository.fetchPersonMap(centre.first, centre.second, zoom, provider, radius = 1)
+            }
+            bitmap
                 ?.asImageBitmap()
                 ?.let {
                     MapThumbCache.put(cacheKey, it)
@@ -159,9 +183,13 @@ internal fun MapCardTile(
             focusedBorder = Border(BorderStroke(2.5.dp, th.focus), shape = RoundedCornerShape(18.dp)),
         ),
     ) {
-        val subtitle = if (showStatus) (if (count == 1) "1 location" else "$count locations") else ""
+        val subtitle = when {
+            needsKey -> "API key required"
+            showStatus -> if (count == 1) "1 location" else "$count locations"
+            else -> ""
+        }
         val hasText = name.isNotBlank() || subtitle.isNotBlank()
-        val picture = map
+        val picture = if (needsKey) null else map
 
         if (style == OverlayTile.STYLE_FULL && picture != null) {
             // Full ignores Hide icon: the map *is* the picture, and there is no icon on it to hide.
