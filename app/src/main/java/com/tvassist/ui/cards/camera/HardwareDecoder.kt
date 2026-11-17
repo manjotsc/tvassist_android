@@ -58,6 +58,7 @@ internal object HardwareDecoder {
             return true
         }
         runCatching { codec.release() }
+        com.tvassist.data.logs.DiagLog.i(TAG, "hardware decoder free ($name)")
         return false
     }
 }
@@ -97,6 +98,30 @@ internal fun chooseCameraSource(decoderBusy: Boolean, hasLowRes: Boolean, inOver
         inOverlay -> CameraSource.UNAVAILABLE
         else -> CameraSource.MAIN_GUARDED
     }
+
+/**
+ * Whether a Media3 error is the decoder's, not the network's or the stream's: Media3 numbers every
+ * decoding error 4xxx (`ERROR_CODE_DECODER_INIT_FAILED` 4001 through the 4005 "format unsupported"
+ * and later additions), so the range rather than a list keeps working as Media3 adds codes.
+ */
+internal fun isDecoderError(errorCode: Int): Boolean = errorCode in 4000..4999
+
+/**
+ * Where a camera goes when its decoder fails *after* the stream started — the case [chooseCameraSource]
+ * cannot see coming.
+ *
+ * The busy check only asks whether a decoder can be *created*. On a TV that lets a secure and an
+ * ordinary decoder coexist (`supports-secure-with-non-secure-codec = true`, e.g. a MediaTek TCL),
+ * creating one succeeds while Netflix plays 4K, and then decoding a 1600x1200 stream fails moments
+ * later (MediaCodec error 12) for lack of resources — issue #3's follow-up. The BRAVIAs never get
+ * here: they refuse at creation, which the busy check catches.
+ *
+ * So step down the same ladder as before a stream starts: the main stream fell over → the camera's
+ * low-res stream (a 640x480 decoded fine beside the same 4K); that fell over too, or there is none →
+ * snapshots. Never back up the ladder: a decoder that just refused will refuse again.
+ */
+internal fun afterDecoderFailure(playingLowRes: Boolean, hasLowRes: Boolean): CameraSource =
+    if (!playingLowRes && hasLowRes) CameraSource.LOW_RES else CameraSource.UNAVAILABLE
 
 /**
  * The largest picture decoded in software before a stream is stopped instead: 1080p.
