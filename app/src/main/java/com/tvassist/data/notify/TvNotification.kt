@@ -69,6 +69,13 @@ data class TvNotification(
     val mediaType: String = "",
     /** Video engine: auto / exoplayer / vlc. */
     val player: String = "auto",
+    /**
+     * RTP over TCP for an `rtsp://` media_url (`rtsp_transport`: "tcp", the default, or "udp").
+     * The same switch a direct camera has (LocalCamera.rtspTcp): TCP because go2rtc — Frigate's
+     * restreamer — refuses UDP outright (#3); "udp" is for the odd camera that only streams over
+     * UDP, and means each player's own UDP-first behaviour rather than UDP only.
+     */
+    val rtspTcp: Boolean = true,
     /** Interactive: let the user press OK to enlarge (fullscreen camera) or BACK to dismiss. */
     val interactive: Boolean = false,
     /**
