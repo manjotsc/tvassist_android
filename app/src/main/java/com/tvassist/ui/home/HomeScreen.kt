@@ -1,5 +1,6 @@
 package com.tvassist.ui.home
 
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -55,7 +56,8 @@ internal fun HomeContent(
     Column(modifier = Modifier.fillMaxSize().padding(horizontal = 40.dp, vertical = 24.dp)) {
         CompactStatus(connection)
         Spacer(Modifier.height(16.dp))
-        HealthWarnings()
+        val secretError by viewModel.secretSaveError.collectAsStateWithLifecycle()
+        HealthWarnings(secretError)
         if (!connected) {
             OnboardingSection(
                 initialUrl = settings.baseUrl,
