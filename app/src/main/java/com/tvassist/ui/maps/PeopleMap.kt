@@ -28,6 +28,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
@@ -53,6 +54,7 @@ import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
@@ -72,6 +74,7 @@ import androidx.tv.material3.Text
 import com.tvassist.data.ha.Entity
 import com.tvassist.data.ha.HaRepository
 import com.tvassist.data.settings.MapCard
+import com.tvassist.data.settings.MapSource
 import com.tvassist.data.settings.OverlayTile
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
@@ -127,18 +130,45 @@ fun PeopleMapScreen(
     val scope = rememberCoroutineScope()
     var mapStyle by remember { mutableStateOf("roadmap") }
     var mapTraffic by remember { mutableStateOf(false) }
+    // The resolved map (a MapSource key) and, for the two vector maps, whether it is drawn dark —
+    // each map remembers its own. Null until resolved; `vector` is what lets the map compose.
+    var source by remember { mutableStateOf<String?>(null) }
+    var mapDark by remember { mutableStateOf(true) }
     var refreshKey by remember { mutableIntStateOf(0) }
+    var needsKey by remember { mutableStateOf(false) }
+    // OpenStreetMap draws as a live vector map; Google stays the raster composite. Null until known.
+    var vector by remember { mutableStateOf<Boolean?>(null) }
+    val vectorState = remember { VectorMapState() }
 
     LaunchedEffect(Unit) { runCatching { mapFocus.requestFocus() } }
-    LaunchedEffect(Unit) { mapStyle = repository.currentMapStyle(); mapTraffic = repository.currentMapTraffic() }
-    LaunchedEffect(mapProvider) { attribution = repository.mapAttribution(mapProvider) }
+    LaunchedEffect(Unit) {
+        mapStyle = repository.currentMapStyle()
+        mapTraffic = repository.currentMapTraffic()
+    }
+    LaunchedEffect(mapProvider) {
+        // Google chosen with no key: say so instead of drawing OpenStreetMap in its place. `vector`
+        // stays null, which also keeps the raster fetch from asking Google with an empty key.
+        needsKey = repository.mapNeedsKey(mapProvider)
+        if (needsKey) {
+            vector = null
+            attribution = ""
+            return@LaunchedEffect
+        }
+        // Light/dark first: `vector` is what lets the map compose, and it should open in the right
+        // style rather than load one and then swap.
+        val src = repository.resolvedMapSource(mapProvider)
+        mapDark = repository.mapDark(src)
+        source = src
+        vector = src != MapSource.GOOGLE
+        attribution = repository.mapAttribution(mapProvider)
+    }
     LaunchedEffect(Unit) { home = repository.homeZoneLatLng() }
 
     val centerLat = center?.first
     val centerLng = center?.second
     // (Re)build the map whenever the center, zoom or style/traffic change.
-    LaunchedEffect(centerLat, centerLng, zoomState, refreshKey) {
-        if (centerLat != null && centerLng != null) {
+    LaunchedEffect(centerLat, centerLng, zoomState, refreshKey, vector) {
+        if (vector == false && centerLat != null && centerLng != null) {
             // Debounce only zoom presses; a new HA position (center move) fetches immediately so the
             // card tracks live.
             if (zoomState != fetchedZoom) delay(120)
@@ -190,8 +220,29 @@ fun PeopleMapScreen(
                     when (e.key) {
                         Key.DirectionUp -> { zoomState = (zoomState + 1).coerceAtMost(20); true }
                         Key.DirectionDown -> { zoomState = (zoomState - 1).coerceAtLeast(3); true }
-                        Key.DirectionRight -> { scope.launch { mapStyle = repository.cycleMapStyle(); refreshKey++ }; true }
-                        Key.DirectionLeft -> { scope.launch { mapTraffic = repository.toggleMapTraffic(); refreshKey++ }; true }
+                        // Google Maps: ▶ steps roadmap → dark → satellite, ◀ toggles traffic. The vector
+                        // map (OpenStreetMap) has no satellite or traffic: ▶ flips light ↔
+                        // dark and ◀ does nothing. Both keys are still consumed, so a stray ◀ cannot move
+                        // focus off the map.
+                        Key.DirectionRight -> {
+                            when (vector) {
+                                false -> scope.launch { mapStyle = repository.cycleMapStyle(); refreshKey++ }
+                                true -> {
+                                    val src = source
+                                    if (src != null) {
+                                        mapDark = !mapDark
+                                        val dark = mapDark
+                                        scope.launch { repository.setMapDark(src, dark) }
+                                    }
+                                }
+                                null -> Unit
+                            }
+                            true
+                        }
+                        Key.DirectionLeft -> {
+                            if (vector == false) scope.launch { mapTraffic = repository.toggleMapTraffic(); refreshKey++ }
+                            true
+                        }
                         else -> false
                     }
                 } else {
@@ -201,29 +252,56 @@ fun PeopleMapScreen(
         contentAlignment = Alignment.Center,
     ) {
         when {
+            needsKey -> MapKeyRequired()
             center == null -> Text("No locations available for $title.", color = Color.White, fontSize = 18.sp)
-            map == null -> Text("Loading map…", color = Color(0xFFB6C0CC), fontSize = 16.sp)
+            vector == null || (vector == false && map == null) ->
+                Text("Loading map…", color = Color(0xFFB6C0CC), fontSize = 16.sp)
             else -> {
-                val displayScale = maxOf(1f, Math.pow(2.0, (zoomState - fetchedZoom).toDouble()).toFloat())
-                Image(
-                    bitmap = map!!,
-                    contentDescription = null,
-                    contentScale = ContentScale.Crop,
-                    modifier = Modifier.fillMaxSize().graphicsLayer { scaleX = displayScale; scaleY = displayScale },
-                )
-                // Project each member from world pixels onto the screen (map is centered on `center`).
-                val scale = maxOf(constraints.maxWidth, constraints.maxHeight) / 1024f
-                val (cgx, cgy) = worldPx(centerLat!!, centerLng!!, zoomState)
                 val halfW = constraints.maxWidth / 2f
                 val halfH = constraints.maxHeight / 2f
+                // A member's offset from the screen centre (which is `center`), in pixels.
+                val offsetOf: (Double, Double) -> Pair<Float, Float>?
+                if (vector == true) {
+                    VectorMap(
+                        state = vectorState,
+                        lat = centerLat!!,
+                        lng = centerLng!!,
+                        zoom = vectorZoom(
+                            zoomState,
+                            maxOf(constraints.maxWidth, constraints.maxHeight),
+                            LocalDensity.current.density,
+                        ),
+                        look = VectorLook.of(source ?: MapSource.OSM, mapDark),
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                    offsetOf = { la, lo -> vectorState.toScreen(la, lo)?.let { (it.x - halfW) to (it.y - halfH) } }
+                } else {
+                    val displayScale = maxOf(1f, Math.pow(2.0, (zoomState - fetchedZoom).toDouble()).toFloat())
+                    Image(
+                        bitmap = map!!,
+                        contentDescription = null,
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.fillMaxSize().graphicsLayer { scaleX = displayScale; scaleY = displayScale },
+                    )
+                    // Project each member from world pixels onto the screen (map is centered on `center`).
+                    val scale = maxOf(constraints.maxWidth, constraints.maxHeight) / 1024f
+                    val (cgx, cgy) = worldPx(centerLat!!, centerLng!!, zoomState)
+                    offsetOf = { la, lo ->
+                        val (gx, gy) = worldPx(la, lo, zoomState)
+                        ((gx - cgx) * scale).toFloat() to ((gy - cgy) * scale).toFloat()
+                    }
+                }
                 val margin = 64f // keep clamped markers fully on-screen
-                members.forEach { m ->
-                    val plat = m.entity.latitude
-                    val plng = m.entity.longitude
-                    if (plat != null && plng != null) {
-                        val (gx, gy) = worldPx(plat, plng, zoomState)
-                        val ox = ((gx - cgx) * scale).toFloat()
-                        val oy = ((gy - cgy) * scale).toFloat()
+                members.forEach { m -> key(m.entity.entityId) {
+                    // The glided position, not the raw fix: markers move between fixes rather than
+                    // jumping to each one. Distances below still read the glided point, so the
+                    // edge label and the arrow agree with where the marker is drawn.
+                    val glided = rememberGlidingFix(m.entity.latitude, m.entity.longitude, m.entity.speed)
+                    val plat = glided?.first
+                    val plng = glided?.second
+                    val off = if (plat != null && plng != null) offsetOf(plat, plng) else null
+                    if (plat != null && plng != null && off != null) {
+                        val (ox, oy) = off
                         if (kotlin.math.abs(ox) <= halfW - margin && kotlin.math.abs(oy) <= halfH - margin) {
                             Box(
                                 Modifier.align(Alignment.Center)
@@ -242,7 +320,7 @@ fun PeopleMapScreen(
                             ) { EdgeIndicator(m.entity, avatars[m.entity.entityId], bearing, distKm) }
                         }
                     }
-                }
+                } }
                 Box(Modifier.align(Alignment.Center)) { HomeMarker() }
             }
         }
@@ -275,9 +353,8 @@ fun PeopleMapScreen(
             color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.SemiBold,
             modifier = Modifier.align(Alignment.TopStart).padding(24.dp).mapPill(),
         )
-        Text(
-            "▲▼ zoom · ▶ ${if (mapStyle == "satellite") "satellite" else "roadmap"} · " +
-                "◀ traffic ${if (mapTraffic) "on" else "off"} · BACK to close",
+        if (!needsKey) Text(
+            mapKeyHint(vector = vector != false, dark = mapDark, googleLook = mapStyle, traffic = mapTraffic),
             color = Color.White.copy(alpha = 0.85f), fontSize = 13.sp,
             modifier = Modifier.align(Alignment.TopEnd).padding(24.dp).mapPill(),
         )
@@ -398,7 +475,7 @@ private fun LegendRow(
                 entity.speed?.takeIf { it > 0 }?.let { InfoLine(Icons.Rounded.Speed, "${(it * 3.6).roundToInt()} km/h") }
             }
             if (OverlayTile.P_UPDATED in options) {
-                Text(updatedAgo(entity.lastChanged, nowMs), color = Color(0xFF8A94A3), fontSize = 11.sp)
+                Text(updatedAgo(entity.lastUpdated ?: entity.lastChanged, nowMs), color = Color(0xFF8A94A3), fontSize = 11.sp)
             }
         }
     }
