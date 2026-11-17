@@ -17,6 +17,9 @@ coil = "2.7.0"
 libvlc = "3.5.1"
 # Media3 1.5.x pairs with compileSdk 35; newer (1.8+/1.10) needs compileSdk 36 (see build.gradle.kts).
 media3 = "1.5.1"
+# 13.0.2 is the last MapLibre built against kotlin-stdlib 2.0.x; 13.1+ pulls 2.2, whose metadata the
+# Kotlin 2.0.21 compiler here cannot read. Moving past it means bumping Kotlin first.
+maplibre = "13.0.2"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -47,6 +50,7 @@ media3-exoplayer-hls = { group = "androidx.media3", name = "media3-exoplayer-hls
 media3-exoplayer-rtsp = { group = "androidx.media3", name = "media3-exoplayer-rtsp", version.ref = "media3" }
 media3-exoplayer-dash = { group = "androidx.media3", name = "media3-exoplayer-dash", version.ref = "media3" }
 media3-ui = { group = "androidx.media3", name = "media3-ui", version.ref = "media3" }
+maplibre-android = { group = "org.maplibre.gl", name = "android-sdk", version.ref = "maplibre" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
