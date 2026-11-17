@@ -7,6 +7,10 @@ import com.tvassist.data.notify.NotificationStore
 import com.tvassist.data.settings.SettingsStore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.launch
 
 /**
  * Application-scoped dependency container. Kept deliberately simple (no DI framework)
@@ -66,6 +70,58 @@ class TvAssistApp : Application() {
         )
     }
 
+    /**
+     * This process's own log, for issue reports (Settings → Logs, and the web console's download).
+     * App-scoped so it starts with the process, whichever component started it — on a cold boot
+     * that is often the accessibility service, long before any activity.
+     */
+    val logs: com.tvassist.data.logs.LogCollector by lazy { com.tvassist.data.logs.LogCollector(filesDir) }
+
+    /** The exported log: the device header, then everything collected. */
+    suspend fun logReport(): String {
+        val s = settingsStore.settings.first()
+        return kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            com.tvassist.data.logs.DeviceReport.build(this@TvAssistApp, s, logs)
+        }
+    }
+
+    /** Keeps the collector, its redaction and detailed logging in step with settings. */
+    private fun startLogs() {
+        appScope.launch {
+            settingsStore.settings
+                .map { s ->
+                    LogConfig(
+                        collect = s.collectLogs,
+                        persist = s.persistLogs,
+                        detailedUntil = s.detailedLogsUntil,
+                        secrets = listOf(s.token, s.notificationToken, s.googleMapsApiKey),
+                        hosts = com.tvassist.data.logs.hostPlaceholders(
+                            s.baseUrl,
+                            s.localCameras.map { listOf(it.streamUrl, it.snapshotUrl, it.lowResUrl) },
+                        ),
+                    )
+                }
+                .distinctUntilChanged()
+                .collect { c ->
+                    // Redaction first: the capture may already be running, and lines arriving after
+                    // a token or camera was added must be scrubbed of it.
+                    logs.redactor = com.tvassist.data.logs.LogRedactor(c.secrets, c.hosts)
+                    com.tvassist.data.logs.DiagLog.untilMs = c.detailedUntil
+                    kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                        logs.configure(c.collect, c.persist)
+                    }
+                }
+        }
+    }
+
+    private data class LogConfig(
+        val collect: Boolean,
+        val persist: Boolean,
+        val detailedUntil: Long,
+        val secrets: List<String>,
+        val hosts: Map<String, String>,
+    )
+
     companion object {
         lateinit var instance: TvAssistApp
             private set
@@ -74,5 +130,6 @@ class TvAssistApp : Application() {
     override fun onCreate() {
         super.onCreate()
         instance = this
+        startLogs()
     }
 }
