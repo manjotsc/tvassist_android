@@ -388,16 +388,27 @@ class ConnectionViewModel(
                 currentMapKey = { settings.value.googleMapsApiKey },
                 onSaveMapKey = { setGoogleMapsApiKey(it) },
                 connState = {
-                    when (connectionState.value) {
-                        is ConnectionState.Connected -> "connected"
-                        is ConnectionState.Connecting, is ConnectionState.Authenticating -> "connecting"
-                        is ConnectionState.Failed -> "failed"
-                        else -> "disconnected"
+                    // A token that could not be stored reads as failed, so the phone form prints why
+                    // (connError, below) instead of a bare "Not connected".
+                    if (secretSaveError.value != null) {
+                        "failed"
+                    } else {
+                        when (connectionState.value) {
+                            is ConnectionState.Connected -> "connected"
+                            is ConnectionState.Connecting, is ConnectionState.Authenticating -> "connecting"
+                            is ConnectionState.Failed -> "failed"
+                            else -> "disconnected"
+                        }
                     }
                 },
                 // The reason behind a "failed" state, so the phone form can show why rather than a
                 // bare "Not connected" — the same message the TV screen shows.
-                connError = { (connectionState.value as? ConnectionState.Failed)?.reason.orEmpty() },
+                // A token the TV could not store securely outranks the connection's own reason:
+                // nothing was connected, and this is why.
+                connError = {
+                    secretSaveError.value
+                        ?: (connectionState.value as? ConnectionState.Failed)?.reason.orEmpty()
+                },
                 deviceName = { android.os.Build.MODEL ?: "this TV" },
                 notifInfo = { settings.value.notificationsEnabled to settings.value.notificationPort },
                 notifToken = { settings.value.notificationToken },
@@ -412,6 +423,9 @@ class ConnectionViewModel(
                     }
                 },
                 backupFileName = { settingsStore.backupFileName() },
+                // The console's own thread, so blocking on the report is fine.
+                logReport = { runBlocking { com.tvassist.TvAssistApp.instance.logReport() } },
+                logFileName = { com.tvassist.data.logs.LogExport.fileName() },
                 onStop = { stopWebOnboarding() },
             )
             if (server.start()) {
@@ -443,9 +457,36 @@ class ConnectionViewModel(
     fun saveAndConnect(baseUrl: String, token: String, verifySsl: Boolean? = null) {
         viewModelScope.launch {
             if (verifySsl != null) settingsStore.setVerifySsl(verifySsl)
-            settingsStore.setConnection(baseUrl.trim(), token.trim())
+            // Not connected on a failed save: a session running on a token that was never stored
+            // would look fine until the next restart silently logged the TV out.
+            if (!saveSecret("Home Assistant token") { settingsStore.setConnection(baseUrl.trim(), token.trim()) }) {
+                return@launch
+            }
             repository.connect(baseUrl.trim(), token.trim())
         }
+    }
+
+    private val _secretSaveError = MutableStateFlow<String?>(null)
+
+    /**
+     * Why the last attempt to store a secret failed — the HA token, the notification token or the
+     * Maps key — or null. Set when Android's Keystore could not encrypt it, in which case nothing
+     * was written and the previous value is still in place (issue #2: it used to be stored
+     * unencrypted instead, silently). Cleared by the next secret that saves.
+     */
+    val secretSaveError: StateFlow<String?> = _secretSaveError.asStateFlow()
+
+    /** Runs one secret write; on a Keystore failure records it for the UI instead of crashing. */
+    private suspend fun saveSecret(what: String, write: suspend () -> Unit): Boolean = try {
+        write()
+        _secretSaveError.value = null
+        true
+    } catch (e: com.tvassist.data.settings.SecretStorageException) {
+        // The exception carries the Keystore's cause, never the secret, so it is safe to log.
+        android.util.Log.e("SecretCrypto", "could not store the $what", e)
+        _secretSaveError.value = "The $what was not saved: ${e.message}. The previous value is unchanged. " +
+            "Restarting the TV usually clears this."
+        false
     }
 
     /** Toggle HA certificate verification; the repository re-dials on the change on its own. */
@@ -592,7 +633,7 @@ class ConnectionViewModel(
     }
 
     fun setNotificationToken(token: String) {
-        viewModelScope.launch { settingsStore.setNotificationToken(token) }
+        viewModelScope.launch { saveSecret("notification token") { settingsStore.setNotificationToken(token) } }
     }
 
     fun setAnnounceEnabled(enabled: Boolean) {
@@ -627,8 +668,44 @@ class ConnectionViewModel(
         viewModelScope.launch { settingsStore.setAnnounceRepeatGap(seconds) }
     }
 
+    // --- Logs (Settings → Logs) ---
+    fun setCollectLogs(on: Boolean) {
+        viewModelScope.launch { settingsStore.setCollectLogs(on) }
+    }
+
+    fun setPersistLogs(on: Boolean) {
+        viewModelScope.launch { settingsStore.setPersistLogs(on) }
+    }
+
+    /** On for [com.tvassist.data.logs.DiagLog.DURATION_MS] from now, or off at once. */
+    fun setDetailedLogging(on: Boolean) {
+        val until = if (on) System.currentTimeMillis() + com.tvassist.data.logs.DiagLog.DURATION_MS else 0L
+        viewModelScope.launch { settingsStore.setDetailedLogsUntil(until) }
+    }
+
+    private val _logSaveStatus = MutableStateFlow<String?>(null)
+
+    /** The outcome of the last "Save logs", for the Logs page to show; null before any. */
+    val logSaveStatus: StateFlow<String?> = _logSaveStatus.asStateFlow()
+
+    fun saveLogsToDownloads() {
+        viewModelScope.launch {
+            _logSaveStatus.value = "Saving…"
+            _logSaveStatus.value = runCatching {
+                val app = com.tvassist.TvAssistApp.instance
+                val text = app.logReport()
+                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    com.tvassist.data.logs.LogExport.saveToDownloads(app, text)
+                }
+            }.fold(
+                onSuccess = { "Saved to $it" },
+                onFailure = { "Couldn't save: ${it.message ?: it.javaClass.simpleName}" },
+            )
+        }
+    }
+
     fun setGoogleMapsApiKey(key: String) {
-        viewModelScope.launch { settingsStore.setGoogleMapsApiKey(key) }
+        viewModelScope.launch { saveSecret("Google Maps key") { settingsStore.setGoogleMapsApiKey(key) } }
     }
 
     fun setMapStyle(style: String) {
@@ -637,6 +714,10 @@ class ConnectionViewModel(
 
     fun setMapTraffic(on: Boolean) {
         viewModelScope.launch { settingsStore.setMapTraffic(on) }
+    }
+
+    fun setMapProvider(key: String) {
+        viewModelScope.launch { settingsStore.setMapProvider(key) }
     }
 
     fun saveLocalCamera(camera: com.tvassist.data.settings.LocalCamera) {
