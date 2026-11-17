@@ -1,0 +1,73 @@
+{
+  "_comment": [
+    "Which feature each unit-test class belongs to. CI runs one job per area, so a failure reads",
+    "'Unit tests (Voice & Assist)' instead of a package name. Areas are by feature, not by package:",
+    "data.ha holds connection and voice tests, ui.cards holds card and camera tests.",
+    "Every top-level class in app/src/test must appear here exactly once; .github/scripts/test_areas.py",
+    "fails CI otherwise, so a new test can never silently stop running. A helper class that is not a",
+    "test (a shared fixture) goes in 'helpers'."
+  ],
+  "helpers": [],
+  "areas": [
+    {
+      "area": "Cards",
+      "slug": "cards",
+      "classes": [
+        "EntityCardRegistryTest", "StateActiveTest", "CardStatusTest", "AlarmCardTest", "AlarmColourTest",
+        "LockCardTest", "CoverCardTest", "ClimateFeaturesTest", "MediaPlayerCardTest", "AirQualityCardTest",
+        "UpdateCardTest", "OkBurstFilterTest"
+      ]
+    },
+    {
+      "area": "Voice & Assist",
+      "slug": "voice",
+      "classes": [
+        "ConversationThreadTest", "PipelineEventsTest", "VoiceLevelTest", "AssistPipelineTest",
+        "ConversationReplyTest"
+      ]
+    },
+    {
+      "area": "Connection & security",
+      "slug": "connection",
+      "classes": [
+        "HaWebSocketUrlTest", "InsecureTlsTest", "SameOriginTest", "SafeUrlTest", "FailureReasonTest",
+        "ServiceCallErrorTest"
+      ]
+    },
+    {
+      "area": "Overlay & UI",
+      "slug": "overlay",
+      "classes": ["OverlayThemeTest", "EntityIconResolveTest", "OverlayLayoutEditTest", "LegacyStyleMigrationTest"]
+    },
+    {
+      "area": "Maps",
+      "slug": "maps",
+      "classes": ["FollowPredictorTest", "MapSourceTest", "VectorLookTest", "MapUiTextTest", "VectorZoomTest", "MapCardTest"]
+    },
+    {
+      "area": "Notifications",
+      "slug": "notifications",
+      "classes": ["NotificationServerTest", "NotificationStoreTimingTest", "TtsUrlTest"]
+    },
+    {
+      "area": "Cameras & video",
+      "slug": "cameras",
+      "classes": ["CameraSourceTest", "PlayerChoiceTest", "ClipRetryTest", "LocalCameraRtspTcpTest"]
+    },
+    {
+      "area": "Logs",
+      "slug": "logs",
+      "classes": ["LogRedactorTest", "LogStorageTest"]
+    },
+    {
+      "area": "Settings & backup",
+      "slug": "settings",
+      "classes": ["SecretCryptoTest", "BackupCryptoTest", "NeedsKeepAliveTest", "SettingsBackupSerializationTest"]
+    },
+    {
+      "area": "Setup console & updates",
+      "slug": "console",
+      "classes": ["TinyHttpParseTest", "UpdateCheckerTest"]
+    }
+  ]
+}

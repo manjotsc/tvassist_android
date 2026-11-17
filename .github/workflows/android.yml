@@ -7,7 +7,7 @@ name: Android CI
 #   Collect info & changes ┼─ Lint workflow files
 #                          └─ Prepare Gradle ─┬─ Compile (debug)
 #                                             ├─ Android lint
-#                                             ├─ Unit tests (matrix, one job per area) ── Test report
+#                                             ├─ Unit tests (matrix, one job per feature) ── Test report
 #                                             └─ Release build (R8, unsigned)
 #
 # Release signing needs local.properties + tv-assist-release.jks, which are git-ignored and stay on
@@ -35,6 +35,7 @@ jobs:
     outputs:
       code: ${{ steps.changes.outputs.code }}
       workflows: ${{ steps.changes.outputs.workflows }}
+      test-matrix: ${{ steps.areas.outputs.test-matrix }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -73,6 +74,13 @@ jobs:
           else
             echo "workflows=false" >> "$GITHUB_OUTPUT"
           fi
+
+      # Every test class must belong to exactly one feature area (.github/test-areas.json), or this
+      # fails and nothing else runs — a test with no area would otherwise never run in CI at all.
+      # Builds the unit-test matrix from the same file.
+      - name: Check unit test areas
+        id: areas
+        run: python3 .github/scripts/test_areas.py .github/test-areas.json app/src/test
 
   wrapper:
     name: Validate Gradle wrapper
@@ -162,49 +170,33 @@ jobs:
 
   unit-tests:
     name: Unit tests (${{ matrix.area }})
-    needs: prepare
+    needs: [info, prepare]
     runs-on: ubuntu-latest
     strategy:
       # Every area reports, even when one fails — the point is seeing which.
       fail-fast: false
+      # One job per feature area, from .github/test-areas.json (built by the info job).
       matrix:
-        include:
-          - area: cards
-            include: 'com.tvassist.ui.cards.*'
-          - area: maps
-            include: 'com.tvassist.ui.maps.*'
-          - area: settings
-            include: 'com.tvassist.data.settings.*'
-          - area: logs
-            include: 'com.tvassist.data.logs.*'
-          - area: notify
-            include: 'com.tvassist.data.notify.*'
-          # Everything not claimed above (ha, assist, web, update, ui), so a new test package can
-          # never fall between the areas and silently stop running.
-          - area: other
-            exclude: 'com.tvassist.ui.cards.*,com.tvassist.ui.maps.*,com.tvassist.data.settings.*,com.tvassist.data.logs.*,com.tvassist.data.notify.*'
+        include: ${{ fromJSON(needs.info.outputs.test-matrix) }}
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/setup-gradle-build
       - name: testDebugUnitTest
         env:
           TEST_INCLUDE: ${{ matrix.include }}
-          TEST_EXCLUDE: ${{ matrix.exclude }}
-        run: >
-          ./gradlew --no-daemon :app:testDebugUnitTest
-          "-PtestInclude=${TEST_INCLUDE}" "-PtestExclude=${TEST_EXCLUDE}"
+        run: ./gradlew --no-daemon :app:testDebugUnitTest "-PtestInclude=${TEST_INCLUDE}"
       - name: Upload test results
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v4
         with:
-          name: test-results-${{ matrix.area }}
+          name: test-results-${{ matrix.slug }}
           path: app/build/test-results/testDebugUnitTest/*.xml
           if-no-files-found: ignore
       - name: Upload test report
         if: ${{ failure() }}
         uses: actions/upload-artifact@v4
         with:
-          name: test-report-${{ matrix.area }}
+          name: test-report-${{ matrix.slug }}
           path: app/build/reports/tests/testDebugUnitTest/
           if-no-files-found: ignore
 
@@ -221,7 +213,7 @@ jobs:
           path: results
       # One table for the whole matrix on the run's summary page, plus an annotation per failure.
       - name: Summarise
-        run: python3 .github/scripts/test_report.py results
+        run: python3 .github/scripts/test_report.py results .github/test-areas.json
 
   release:
     name: Release build (R8, unsigned)
