@@ -61,7 +61,8 @@ jobs:
             all "no base commit to compare with"
           fi
           changed=$(git diff --name-only "$base" HEAD)
-          echo "Changed files:"; echo "$changed" | sed 's/^/  /'
+          echo "Changed files:"
+          while IFS= read -r file; do echo "  $file"; done <<< "$changed"
           # The build: app sources and resources, Gradle files, and CI itself (a workflow change
           # must prove it still builds).
           if echo "$changed" | grep -qE '^(app/|gradle/|build\.gradle\.kts$|settings\.gradle\.kts$|gradle\.properties$|gradlew|\.github/)'; then
