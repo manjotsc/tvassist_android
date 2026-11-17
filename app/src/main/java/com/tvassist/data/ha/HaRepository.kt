@@ -5,6 +5,7 @@ import android.graphics.BitmapFactory
 import android.util.Log
 import com.tvassist.data.settings.LocalCamera
 import com.tvassist.data.settings.MapCard
+import com.tvassist.data.settings.MapSource
 import com.tvassist.data.settings.SettingsStore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -440,6 +441,7 @@ class HaRepository(
         val now = System.currentTimeMillis()
         googleSessions[cacheKey]?.let { if (it.expiryMs > now + 60_000) return it.token }
         return runCatching {
+            // "dark" is a roadmap with styles applied; satellite imagery has no dark version.
             val mapType = if (style == "satellite") "satellite" else "roadmap"
             val layers = buildList {
                 if (style == "satellite" && traffic) add("layerRoadmap") // roads under traffic on imagery
@@ -450,6 +452,7 @@ class HaRepository(
                 put("language", "en-US")
                 put("region", "US")
                 if (layers.isNotEmpty()) put("layerTypes", JsonArray(layers.map { JsonPrimitive(it) }))
+                if (style == "dark") put("styles", GOOGLE_DARK_STYLES)
             }.toString()
             val req = Request.Builder()
                 .url("https://tile.googleapis.com/v1/createSession?key=$key")
@@ -478,23 +481,54 @@ class HaRepository(
         }.getOrNull()?.also { tileCache.put(cacheKey, it) }
     }
 
-    /** Whether Google tiles are used, given a per-tile [provider] override and the global key. */
-    private fun usesGoogle(provider: String, hasKey: Boolean): Boolean = when (provider) {
-        "osm" -> false
-        "google" -> hasKey
-        else -> hasKey // auto: follow the global setting
+    /**
+     * The map a screen draws (a [MapSource] key), from a tile's [provider] override, the choice in
+     * Settings → Maps and whether a Google key is set.
+     */
+    suspend fun resolvedMapSource(provider: String = "auto"): String {
+        val s = settingsStore.settings.first()
+        return MapSource.resolve(provider, s.mapProvider, s.googleMapsApiKey.isNotBlank())
+    }
+
+    /** Whether [provider] resolves to Google with no key set — see [MapSource.missingKey]. */
+    suspend fun mapNeedsKey(provider: String = "auto"): Boolean {
+        val s = settingsStore.settings.first()
+        return MapSource.missingKey(provider, s.mapProvider, s.googleMapsApiKey.isNotBlank())
     }
 
     /** Current global map style / traffic (for the on-map D-pad toggles). */
     suspend fun currentMapStyle(): String = settingsStore.settings.first().mapStyle
     suspend fun currentMapTraffic(): Boolean = settingsStore.settings.first().mapTraffic
 
-    /** Flip the global map style (roadmap ↔ satellite) and return the new value. */
+    /** Step Google's look roadmap → dark → satellite → roadmap, and return the new value. */
     suspend fun cycleMapStyle(): String {
-        val next = if (settingsStore.settings.first().mapStyle == "satellite") "roadmap" else "satellite"
+        val next = MapSource.nextGoogleLook(settingsStore.settings.first().mapStyle)
         settingsStore.setMapStyle(next)
         return next
     }
+
+    /**
+     * Everything that changes what a map thumbnail looks like, as one string that changes when any
+     * of it does — the sidebar's map tiles key their cached picture on it and redraw live.
+     */
+    val mapAppearanceFlow: kotlinx.coroutines.flow.Flow<String>
+        get() = settingsStore.settings.map {
+            listOf(
+                it.mapProvider, it.googleMapsApiKey.isNotBlank(), it.mapOsmDark,
+                it.mapStyle, it.mapTraffic,
+            ).joinToString("|")
+        }.distinctUntilChanged()
+
+    /**
+     * Whether the vector map [source] is drawn dark. Only OpenStreetMap is vector today; taking the
+     * source keeps each future vector map's light/dark its own, as Google-style's was.
+     */
+    @Suppress("UNUSED_PARAMETER")
+    suspend fun mapDark(source: String): Boolean = settingsStore.settings.first().mapOsmDark
+
+    /** Remember [dark] for the vector map [source]. */
+    @Suppress("UNUSED_PARAMETER")
+    suspend fun setMapDark(source: String, dark: Boolean) = settingsStore.setMapOsmDark(dark)
 
     /** Toggle the global traffic overlay and return the new value. */
     suspend fun toggleMapTraffic(): Boolean {
@@ -503,10 +537,19 @@ class HaRepository(
         return next
     }
 
-    /** Attribution label for the active map provider (both OSM and Google require attribution). */
+    /**
+     * Whether [provider] resolves to OpenStreetMap, which is drawn as vector tiles
+     * (`ui/maps/VectorMap.kt`) rather than through [fetchPersonMap]. Google stays raster.
+     */
+    suspend fun usesVectorMap(provider: String = "auto"): Boolean = resolvedMapSource(provider) != MapSource.GOOGLE
+
+    /**
+     * Attribution label for the active map provider (both OSM and Google require attribution).
+     * The OSM wording is OpenFreeMap's requested credit, since its tiles are what the vector map draws.
+     */
     suspend fun mapAttribution(provider: String = "auto"): String =
-        if (usesGoogle(provider, settingsStore.settings.first().googleMapsApiKey.isNotBlank())) "Map data ©Google"
-        else "© OpenStreetMap"
+        if (resolvedMapSource(provider) == MapSource.GOOGLE) "Map data ©Google"
+        else "OpenFreeMap © OpenMapTiles · Data © OpenStreetMap"
 
     /**
      * Builds a map image centered exactly on [lat],[lng] (so a UI marker drawn at the image
@@ -526,7 +569,11 @@ class HaRepository(
         val s = runCatching { settingsStore.settings.first() }.getOrNull()
         val key = s?.googleMapsApiKey?.trim().orEmpty()
         val googleSession =
-            if (usesGoogle(provider, key.isNotEmpty())) googleSession(s!!.mapStyle, s.mapTraffic, key) else null
+            if (s != null && MapSource.resolve(provider, s.mapProvider, key.isNotEmpty()) == MapSource.GOOGLE) {
+                googleSession(s.mapStyle, s.mapTraffic, key)
+            } else {
+                null
+            }
         val tileAt: (Int, Int, Int) -> Bitmap? =
             if (googleSession != null) { z, x, y -> googleTile(z, x, y, googleSession, key) }
             else { z, x, y -> osmTile(z, x, y) }
@@ -785,3 +832,36 @@ private fun MapCard.toEntity(): Entity = Entity(
         )
     }),
 )
+
+/**
+ * Google's roadmap in dark colours, sent as the `styles` of a Map Tiles API session (the
+ * `"dark"` value of `Settings.mapStyle`). Our own palette, in Google's documented styler format:
+ * dark slate land, deep blue water, muted roads, light labels with dark halos.
+ */
+private val GOOGLE_DARK_STYLES: JsonArray = run {
+    fun rule(featureType: String?, elementType: String?, color: String) = buildJsonObject {
+        if (featureType != null) put("featureType", featureType)
+        if (elementType != null) put("elementType", elementType)
+        put("stylers", JsonArray(listOf(buildJsonObject { put("color", color) })))
+    }
+    JsonArray(
+        listOf(
+            rule(null, "geometry", "#1E232A"),
+            rule(null, "labels.text.fill", "#9AA0A6"),
+            rule(null, "labels.text.stroke", "#1E232A"),
+            rule("administrative.locality", "labels.text.fill", "#D0D4DA"),
+            rule("poi", "labels.text.fill", "#8F959C"),
+            rule("poi.park", "geometry", "#1F3326"),
+            rule("road", "geometry", "#3A414C"),
+            rule("road", "geometry.stroke", "#262B33"),
+            rule("road", "labels.text.fill", "#A9AEB5"),
+            rule("road.highway", "geometry", "#6B5E43"),
+            rule("road.highway", "geometry.stroke", "#3A3326"),
+            rule("road.highway", "labels.text.fill", "#E0CFA6"),
+            rule("transit", "geometry", "#2F343C"),
+            rule("transit.station", "labels.text.fill", "#8AB4F8"),
+            rule("water", "geometry", "#16263A"),
+            rule("water", "labels.text.fill", "#7FA6D6"),
+        ),
+    )
+}
