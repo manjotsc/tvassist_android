@@ -22,8 +22,8 @@ android {
         applicationId = "com.tvassist"
         minSdk = 26
         targetSdk = 35
-        versionCode = 9
-        versionName = "1.1.7"
+        versionCode = 10
+        versionName = "1.1.8"
         // Only package ARM native libs (drop x86/x86_64 — emulator-only) so the universal APK
         // stays as small as possible while still covering 32-bit + 64-bit Android TV devices.
         ndk {
@@ -164,6 +164,10 @@ dependencies {
     implementation(libs.media3.exoplayer.rtsp)
     implementation(libs.media3.exoplayer.dash)
     implementation(libs.media3.ui)
+
+    // Vector OpenStreetMap rendering (OpenGL ES 3; both BRAVIAs report 3.2). Native libs again,
+    // ~11 MB uncompressed on armeabi-v7a. Google maps stay raster tiles — see ui/maps/VectorMap.kt.
+    implementation(libs.maplibre.android)
 
     // Unit tests (pure-JVM: field parsing, serialization round-trips, notification-store timing).
     testImplementation(libs.junit)
