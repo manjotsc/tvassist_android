@@ -1,5 +1,6 @@
 package com.tvassist.ui.settings
 
+import com.tvassist.data.settings.LocalCamera
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -54,16 +55,17 @@ internal fun CamerasPage(viewModel: ConnectionViewModel, onBack: () -> Unit) {
         // is not a local one). A camera added on this page has its own Player, and a notification
         // picks its player in the call. Both rows offer the same three chips, and this one used to
         // be titled "Video player", so changing it to fix a camera added below did nothing visible.
-        Text("Player for Home Assistant cameras", fontSize = 14.sp, color = TxtMuted)
+        Text("Default player", fontSize = 14.sp, color = TxtMuted)
         Spacer(Modifier.height(2.dp))
         Text(
-            "Cameras added below each have their own Player setting — change it when editing the camera. " +
-                "VLC handles more cameras (HEVC, quirky RTSP); ExoPlayer is lighter.",
+            "Used by Home Assistant cameras, and by cameras below whose player is set to Default. Auto plays " +
+                "on ExoPlayer (lighter, with sound) and switches to VLC for a stream ExoPlayer can't play, " +
+                "or while another app is using the TV's video decoder.",
             fontSize = 12.sp, color = TxtMuted,
         )
         Spacer(Modifier.height(8.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            listOf("auto" to "Auto", "exoplayer" to "ExoPlayer", "vlc" to "VLC").forEach { (value, label) ->
+            PLAYER_LABELS.forEach { (value, label) ->
                 ChipButton(label, settings.streamPlayer == value, onClick = { viewModel.setStreamPlayer(value) })
             }
         }
@@ -124,7 +126,10 @@ internal fun CamerasPage(viewModel: ConnectionViewModel, onBack: () -> Unit) {
             Text("Player for this camera", color = TxtMuted, fontSize = 13.sp)
             Spacer(Modifier.height(6.dp))
             FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                listOf("auto" to "Auto", "exoplayer" to "ExoPlayer", "vlc" to "VLC").forEach { (v, label) ->
+                // "Default" names what it currently resolves to, so following the global setting is
+                // visibly a choice of player rather than a mystery fourth engine.
+                val globalLabel = PLAYER_LABELS[settings.streamPlayer] ?: settings.streamPlayer
+                (listOf(LocalCamera.PLAYER_DEFAULT to "Default ($globalLabel)") + PLAYER_LABELS.toList()).forEach { (v, label) ->
                     ChipButton(label, d.player == v, onClick = { draft = d.copy(player = v) })
                 }
             }
@@ -165,3 +170,6 @@ internal fun CamerasPage(viewModel: ConnectionViewModel, onBack: () -> Unit) {
         }
     }
 }
+
+/** The three engines, as the Cameras page names them. Keys are persisted. */
+private val PLAYER_LABELS = linkedMapOf("auto" to "Auto", "exoplayer" to "ExoPlayer", "vlc" to "VLC")
